@@ -1,0 +1,1155 @@
+---
+title: "ER2_with dynamic dosing_modified"
+author: "Xuefen Yin"
+date: "2024-11-6"
+output: pdf_document
+---
+
+# R setup
+```{r setup, echo = F}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+rm(list=ls(all=TRUE))
+
+library(tidyverse)
+library(mrgsolve)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(gridExtra)
+library(muhaz)
+library(zoo)
+library(ggExtra)
+library(patchwork)
+library(ggridges)
+library(purrr)
+library(grid)
+library(cowplot)
+library(openxlsx)
+library(brms) ## Emax
+library(broom)
+library(readxl)
+
+new_path <- paste("C:/rtools44/usr/bin", "C:/rtools44/mingw64/bin", Sys.getenv("PATH"), sep=";")
+Sys.setenv(PATH = new_path)
+
+theme_set(theme_bw())
+```
+#1 Common functions(run one time)
+
+##1.1 common function for data visualization 
+
+```{r}
+custom_log_labels <- function(x) {
+  ifelse(x < 10, 
+         sprintf("%.1f", x),  # One decimal place for numbers < 10
+         sprintf("%.0f", x))  # No decimal places for numbers >= 10
+}
+
+custom_theme <- theme_classic() +
+  theme(
+    panel.grid.major = element_line(color = "gray70", linewidth = 0.5),  # Major grid lines
+    panel.grid.minor = element_line(color = "gray90", linewidth = 0.25)  # Minor grid lines
+  )
+
+# General KM plot function
+KM_plot_G <- function(km_object, data, title_prefix, group_labels, colors, plot_x_scale = 600, save_path) {
+
+    if (length(group_labels) != length(colors)) {
+    stop("The length of group_labels and colors must be the same")
+  }
+  
+  plot <- ggsurvplot(
+    km_object,
+    data = data,
+    surv.median.line = "hv",
+    conf.int = TRUE,
+    #pval = TRUE,
+    #pval.method = TRUE,
+    risk.table = TRUE,
+    risk.table.y.text = FALSE,
+    tables.theme = theme_cleantable(),
+    tables.height = 0.25,
+    palette = colors,
+    legend.labs = group_labels,
+    xlim = c(0, plot_x_scale),
+    legend.title = element_blank() 
+  ) + labs(
+    y = "Probability of No Event",
+    x = "Days",
+    title = paste("True ER relationship -", title_prefix)
+  )
+
+  plot$plot <- plot$plot +
+    theme(plot.subtitle = element_text(size = 10)) +
+    scale_x_continuous(breaks = seq(0, plot_x_scale, by = 50))
+  
+  
+  if (identical(data, analysis)) {
+    ggsave(filename = save_path, plot = plot$plot, width = 7, height = 5, dpi = 400, units = "in")
+  }
+    
+  return(plot)
+}
+
+
+# KM plot function containing saving function
+KM_plot_Q <- function(km_object, data, title_prefix,group_labels, colors,plot_x_scale = 600, save_path) {
+  plot <- ggsurvplot(
+    km_object,
+    data = data,
+    surv.median.line = "hv",
+    conf.int = TRUE,
+    #pval = TRUE,
+   # pval.method = TRUE,
+    risk.table = TRUE,
+    risk.table.y.text = FALSE,
+    tables.theme = theme_cleantable(),
+    tables.height = 0.25,
+    palette = colors,
+    legend.labs = group_labels,
+    xlim = c(0, plot_x_scale),
+    legend.title = element_blank() 
+  )+ labs( y = "Probability of No Event",
+           x = "Days",
+          title = paste("True ER relationship -",title_prefix)) 
+
+   plot$plot <- plot$plot +
+   theme(plot.subtitle = element_text(size = 10))+
+   scale_x_continuous(breaks = seq(0, plot_x_scale, by = 50))
+   
+  # # Save the plot
+   ggsave(filename = save_path, plot = plot$plot, width = 7, height = 5, dpi = 400, units = "in")
+  
+  return(plot)
+}
+
+###KM plot with no strata
+
+KM_plot <- function(km_object, data, title_prefix,plot_x_scale = 600, save_path) {
+    plot <- ggsurvplot(
+    km_object,
+    data = data,
+    surv.median.line = "hv",
+    color = "black",
+    conf.int.fill = "grey45",
+    conf.int = TRUE,
+    title = paste("True ER -",title_prefix),
+    xlab = "Days",
+    ylab = "Probability of no event",
+    xlim = c(0, plot_x_scale),
+    risk.table = "abs_pct",
+    risk.table.y.text = FALSE,
+    cumcensor = TRUE,
+    tables.theme = theme_cleantable(),
+    tables.height = 0.15,
+    legend = "none"
+  )
+  
+  plot$plot <- plot$plot +
+    theme(
+      plot.title = element_text(size = 14),
+      plot.subtitle = element_text(size = 12),
+      axis.title = element_text(size = 14),
+      axis.text = element_text(size = 12)
+    ) +
+    scale_x_continuous(breaks = seq(0, plot_x_scale, by = 50)) +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+     # axis.text.x = element_text(angle = 60)
+    )
+  
+  # # Save the plot
+   ggsave(filename = save_path, plot = plot$plot, width = 5, height = 4, dpi = 400, units = "in")
+   
+  return(plot)
+}
+
+
+# comparing tumor size change with the dose change
+Tumor_Dose_plot <- function(id, data, response_duration, pfs_linear) {
+  data <- data %>%
+    filter(ID == id) 
+  first_day <- response_duration$First_Response_Day[response_duration$ID == id]
+  last_day <- response_duration$Last_Response_Day[response_duration$ID == id]
+  pfs_day <- pfs_linear$DAY[pfs_linear$ID == id]
+  
+  max_tumor <- max(data$Tumor, na.rm = TRUE)
+  max_dose <- max(data$DOSE, na.rm = TRUE)
+  
+  p <- ggplot(data, aes(x = DAY)) +
+    geom_point(aes(y = DOSE / max_dose * max_tumor), color = "springgreen4", size = 1) +
+    geom_line(aes(y = Tumor), size = 1.5, color = "black") +
+    geom_line(aes(y = TumorB * 1.2), linetype = "dashed", color = "red", size = 0.5) +
+    geom_line(aes(y = TumorB * 0.7), linetype = "dashed", color = "navyblue", size = 0.5) +
+    theme_classic() +
+    geom_vline(xintercept = first_day, color = "navyblue") +
+    annotate("text", x = first_day, y = max_tumor * 0.75, label = as.character(first_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = last_day, color = "navyblue") +
+    annotate("text", x = last_day, y = max_tumor, label = as.character(last_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = pfs_day, color = "red") +
+    annotate("text", x = pfs_day, y = max_tumor * 0.75, label = as.character(pfs_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "red", fontface = "bold") +
+    labs(
+      x = "Time (Days)",
+      y = "Tumor size (mm)",
+      title = paste("ID-", id)
+    ) +
+    scale_y_continuous(
+      name = "Tumor size (mm)",
+      sec.axis = sec_axis(~ . * max_dose  / max_tumor, name = "Dose (mg)", 
+                          breaks = seq(0, max_dose , by = 20)),
+      limits = c(0, NA)
+    ) +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      axis.text.x = element_text(size = 8, angle = 0),
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(hjust = 0.5)
+    )
+  
+  return(p)
+}
+
+# comparing tumor size change with the exposure metrics change
+PKPD_profile_plot <- function(id, data, response_duration, pfs_linear) {
+  data <- data %>% filter(ID == id) 
+  first_day <- response_duration$First_Response_Day[response_duration$ID == id]
+  last_day <- response_duration$Last_Response_Day[response_duration$ID == id]
+  pfs_day <- pfs_linear$DAY[pfs_linear$ID == id]
+  
+  max_tumor <- max(data$Tumor, na.rm = TRUE)
+  max_CP <- max(data$CP, na.rm = TRUE)
+  min_CP <- min(data$CP[data$CP > 0], na.rm = TRUE)  # Minimum non-zero CP value
+  
+  p <- ggplot(data, aes(x = DAY)) +
+    geom_point(aes(y = scales::rescale(log10(CP), to = c(0, max_tumor))), color = "springgreen4", size = 1) +
+    geom_line(aes(y = Tumor), size = 1.5, color = "black") +
+    geom_line(aes(y = TumorB * 1.2), linetype = "dashed", color = "red", size = 0.5) +
+    geom_line(aes(y = TumorB * 0.7), linetype = "dashed", color = "navyblue", size = 0.5) +
+    theme_classic() +
+    geom_vline(xintercept = first_day, color = "navyblue") +
+    annotate("text", x = first_day, y = max_tumor * 0.75, label = as.character(first_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = last_day, color = "navyblue") +
+    annotate("text", x = last_day, y = max_tumor, label = as.character(last_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = pfs_day, color = "red") +
+    annotate("text", x = pfs_day, y = max_tumor * 0.75, label = as.character(pfs_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "red", fontface = "bold") +
+    labs(
+      x = "Time (Days)",
+      y = "Tumor size (mm)",
+      title = paste("ID-", id)
+    ) +
+    scale_y_continuous(
+      name = "Tumor size (mm)",
+      sec.axis = sec_axis(
+        ~ 10^(. * (log10(max_CP) - log10(min_CP)) / max_tumor + log10(min_CP)),
+        name = "Plasma concentration (ng/ml)",
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      ),
+      limits = c(0, NA)
+    ) +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      axis.text.x = element_text(size = 8, angle = 0),
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(hjust = 0.5)
+    )
+  
+  return(p)
+}
+
+# plot time-exposure metrics profile
+Typical_plot_DH2 <- function(data, y_var, title) {
+  ggplot(data, aes(x = DAY, y = !!sym(y_var), color = as.factor(ID))) +
+    geom_point() +
+    geom_line() +
+    theme_classic() +
+    theme(
+      panel.background = element_rect(fill = "white"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      plot.title = element_text(hjust = 0.5),
+      legend.key.size = unit(0.5, "lines"), # Reduce the legend key size
+      legend.text = element_text(size = 6) # Reduce the legend text size
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    labs(x = "Time (days)",
+         y = y_var,
+         title = title,
+         color = "ID")
+}
+
+# genetate plot of PK using ID having the median Ctrough at the end of first doing interval
+CP_plot <- function(data, title) {
+  ggplot(data, aes(x = time, y = CP, color = as.factor(ID))) +
+    geom_point() +
+    geom_line() +
+    scale_y_log10() +
+    theme_classic() +
+    theme(
+      panel.background = element_rect(fill = "white"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    labs(x = "Time (hours)", y = "Concentration", title = title, color = "ID")
+}
+
+
+logistic_regression_PK <- function(summary_data, combined_data, df.ER.IDQ, x_var, y_var) {
+  # Ensure x variable is numeric for log scale
+  combined_data[[x_var]] <- as.numeric(combined_data[[x_var]])
+  
+  ggplot() +
+  
+       # True ER Logistic regression line
+    geom_smooth(data = combined_data, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER Logistic Regression"), 
+                method = "glm", method.args = list(family = "binomial")) +
+    geom_point(data = combined_data, aes(x = .data[[x_var]], y = .data[[y_var]]), 
+               shape = "|", alpha = 0.5) +
+   
+     # Logistic regression line for current dataset
+    geom_smooth(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]], color = "Logistic Regression"), 
+                method = "glm", method.args = list(family = "binomial")) +
+    geom_point(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]]), 
+               shape = "|", alpha = 0.5) +
+    
+    # Original True ER line
+    geom_line(data = summary_data, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER"), size = 1.5) +
+    geom_point(data = summary_data, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER"), size = 2) +
+    geom_text(data = summary_data, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.8),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of ORR Event",
+      title = paste("Logistic Regression -", x_var),
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    scale_x_log10(labels = custom_log_labels,limits = c(0.01, NA)) +
+    scale_color_manual(values = c("True ER Logistic Regression" = "blue", "Logistic Regression" = "black", "True ER" = "forestgreen"))
+}
+
+logistic_regression_PD <- function(data, predictor, response) {
+  # Ensure predictor is numeric for log scale
+  data[[predictor]] <- as.numeric(data[[predictor]])
+
+  plot <- data %>%
+    ggplot(aes_string(x = predictor, y = response)) +
+    geom_point(shape = "|") +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    scale_x_log10() +
+    labs(x = predictor,
+         y = "Probability of ORR Event",
+         title = paste("Logistic Regression -", predictor))
+
+  return(plot)
+}
+
+
+```
+
+##1.2 common function to handle the dataset
+```{r}
+## split the dataset into 4 groups
+quantiles <- function(data, column_name, labels = c("1", "2", "3", "4")) {
+  quantiles <- quantile(data[[column_name]], probs = c(0.25, 0.5, 0.75))
+  categorized_column <- cut(data[[column_name]],
+                            breaks = c(-Inf, quantiles, Inf),
+                            labels = labels,
+                            include.lowest = TRUE)
+  return(categorized_column)
+
+}
+
+## split the dataset into 3 groups
+tertile <- function(data, column_name, labels = c("1", "2", "3")) {
+  # Calculate the tertiles
+  tertiles <- quantile(data[[column_name]], probs = c(1/3, 2/3))
+  
+  # Categorize the column based on the tertiles
+  categorized_column <- cut(data[[column_name]], 
+                            breaks = c(-Inf, tertiles, Inf), 
+                            labels = labels, 
+                            include.lowest = TRUE)
+  return(categorized_column)
+}
+
+### perfrom the Mann-Whitney U-Test and save the result
+
+wilcox <- function(df_group1, df_group2, variables) {
+  # Initialize an empty data frame to store results
+  results_df <- data.frame(p_value = numeric(), stringsAsFactors = FALSE)
+  
+  for (var in variables) {
+    # Run the Wilcoxon test for the current variable
+    test_result <- wilcox.test(df_group1[[var]], df_group2[[var]], paired = FALSE, alternative = "two.sided",
+                               conf.int = TRUE, conf.level=0.95) # Note: corrected "confi.level" to "conf.level"
+    
+    # Append the variable name and p-value to the results dataframe
+     temp_result <- data.frame(P.Value = test_result$p.value, stringsAsFactors = FALSE)
+     rownames(temp_result) <- var
+     
+     results_df <- rbind(results_df, temp_result)
+  }
+  return(results_df)
+}
+
+### extract results from univariate Cox PH models_continuous
+
+univ_con <- function(univ_models) {
+    univ_results <- lapply(univ_models, function(x) {
+    x <- summary(x)  # Summarize the model
+    # Extract and format the results
+    P.value <- signif(x$wald["pvalue"], digits=3)
+    wald.test <- signif(x$wald["test"], digits=3)
+    beta <- signif(x$coef[1], digits=3)  # Coefficient beta
+    HR <- signif(exp(x$coef[1]), digits=3)  # Hazard Ratio (HR)
+    HR.confint.lower <- signif(x$conf.int[,"lower .95"], 3)
+    HR.confint.upper <- signif(x$conf.int[,"upper .95"], 3)
+    HR <- paste0(HR, " (",
+                 HR.confint.lower, "-", HR.confint.upper, ")")
+    res <- c(beta, HR, wald.test, P.value)
+    names(res) <- c("beta", "HR (95% CI for HR)", "wald.test", "P.Value")
+    return(res)
+  })
+  # Convert the list of results to a dataframe
+  result_df <- t(as.data.frame(univ_results))
+  return(result_df)
+}
+
+### extract results from univariate Cox PH models_categorical_4 GROUP
+univ_cat <- function(univ_models_G) {
+  
+          univ_results_G <- lapply(univ_models_G, function(x) { 
+          x <- summary(x)
+
+          # Extract Wald test p-value and statistic
+          P.value<-signif(x$wald["pvalue"], digits=2)
+          wald.test<-signif(x$wald["test"], digits=2)
+          beta <- numeric(length = 3)
+          HR <- numeric(length = 3)
+          HR.confint.lower <- numeric(length = 3)
+          HR.confint.upper <- numeric(length = 3)
+          HRs <- character(length = 3)
+  
+          for (i in 1:3) {
+            beta[i] <- signif(x$coef[i], digits = 3)
+            HR[i] <- signif(exp(x$coef[i]), digits = 3) # HR
+            HR.confint.lower[i] <- signif(x$conf.int[i,3],3)
+            HR.confint.upper[i] <- signif(x$conf.int[i,4],3)
+            HRs[i] <- paste0(HR[i], " (", HR.confint.lower[i], "-", HR.confint.upper[i], ")")
+            }
+           res <- c(beta, HRs, wald.test, P.value )
+           names(res) <- c(paste0("Beta", 1:3), paste0("HR (95% CI) ", 1:3), "Wald.Test", "P.Value")
+   
+           return(res)
+
+          })
+          # Convert the list of results to a dataframe
+          result_df <- t(as.data.frame(univ_results_G))
+          return(result_df)
+}  
+
+## extract results from univariate Cox PH models_categorical_3 GROUP
+
+univ_cat_T <- function(univ_models_G) {
+  
+          univ_results_G <- lapply(univ_models_G, function(x) { 
+          x <- summary(x)
+
+          # Extract Wald test p-value and statistic
+          P.value<-signif(x$wald["pvalue"], digits=2)
+          wald.test<-signif(x$wald["test"], digits=2)
+          beta <- numeric(length = 2)
+          HR <- numeric(length = 2)
+          HR.confint.lower <- numeric(length = 2)
+          HR.confint.upper <- numeric(length = 2)
+          HRs <- character(length = 2)
+  
+          for (i in 1:2) {
+            beta[i] <- signif(x$coef[i], digits = 3)
+            HR[i] <- signif(exp(x$coef[i]), digits = 3) # HR
+            HR.confint.lower[i] <- signif(x$conf.int[i,3],3)
+            HR.confint.upper[i] <- signif(x$conf.int[i,4],3)
+            HRs[i] <- paste0(HR[i], " (", HR.confint.lower[i], "-", HR.confint.upper[i], ")")
+            }
+           res <- c(beta, HRs, wald.test, P.value )
+           names(res) <- c(paste0("Beta", 1:2), paste0("HR (95% CI) ", 1:2), "Wald.Test", "P.Value")
+   
+           return(res)
+
+          })
+          # Convert the list of results to a dataframe
+          result_df <- t(as.data.frame(univ_results_G))
+          return(result_df)
+}  
+
+# uni <- coxph(Surv(DAY, EVENT) ~ CtroughQ, data = df.ER)
+# summary<- summary(uni)
+# summary$conf.int
+
+# extract results from univariate Cox PH models_continuous
+
+logistic_analysis <- function(logistic_Results, covariates) {
+  logistic_summaries <- lapply(logistic_Results, summary)
+  
+  logistic.results <- lapply(seq_along(logistic_summaries), function(i) {
+    x <- logistic_summaries[[i]]
+    P.value <- signif(x$coefficients[2, 4], digits=3)
+    Slope <- signif(x$coefficients[2, 1], digits=3)
+    AIC <- round(AIC(logistic_Results[[i]]), 1)   # Use the actual model object, not the summary
+    res <- c(Slope, AIC, P.value)
+    names(res) <- c("Slope","AIC", "P.Value")
+    return(res)
+  })
+  
+  # Convert the list of results to a dataframe
+  result_df <- as.data.frame(do.call(rbind, logistic.results))
+  row.names(result_df) <- covariates  # Add row names
+  
+  return(result_df)
+}
+
+Calculate_EC50_linear <- function(predictor, data) {
+  
+  # Initialize an empty list to store results
+  EC50_results <- list()
+  
+  # Loop through each predictor in the predictor vector
+  for (pred in predictor) {
+    
+    # Fit the logistic regression model
+    formula <- as.formula(paste("EVENT ~", pred))
+    model <- glm(formula, family="binomial", data=data)
+    
+    # Extract coefficients
+    b0 <- coef(model)[1]
+    b1 <- coef(model)[2]
+    
+    # Calculate EC50 and its standard error
+    EC50 <- -b0 / b1
+    dEC50_b0 <- -1 / b1
+    dEC50_b1 <- b0 / b1^2
+    dEC50_b <- matrix(c(dEC50_b0, dEC50_b1), ncol=1)
+    V_EC50 <- t(dEC50_b) %*% vcov(model) %*% dEC50_b
+    Std_Err <- sqrt(V_EC50)
+    
+    # Calculate confidence intervals
+    LB <- EC50 - 1.96 * Std_Err
+    UB <- EC50 + 1.96 * Std_Err
+    
+    # Store the results in the list
+    EC50_results[[pred]] <- c(b0, b1, EC50, Std_Err, LB, UB)
+  }
+  
+  # Convert the list to a matrix and set row and column names
+  EC50_out <- do.call(rbind, EC50_results)
+  colnames(EC50_out) <- c("b0", "b1", "EC50", "Std Err", "LB", "UB")
+  rownames(EC50_out) <- predictor
+  
+  # Return the rounded results
+  return(round(EC50_out, 4))
+}
+```
+
+#2 Tumor growth profiles with treatment effect
+
+-event=1, the event onset time will be the true event onset time(actual last assessment day without considering clinical visit situation). e.g., if the onset time is 17 days, then the time is 17 days;
+-event=0, either the last observed event onset day (based on the overall ORR distribution after outlier removal) or the patient's actual last assessment day—whichever occurs earlier.
+
+##2.1 using log transformed exposure metrics without using prediction funciton
+```{r}
+df.exp <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/PFS/True inverse ER_PFS_DH2_HL24_ID20871_ii24_60&40&20_LDR/df_exp.rds")
+First_day_conc <- df.exp %>% filter(DAY==1)%>% select(ID, Ctrough, Cavg)%>% rename(Ctrough1D=Ctrough, Cavg1D=Cavg)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH1")
+Modified_trueER_DH1 <- read.csv("True ER_ORR.csv")
+Modified_trueER_DH1$avgDoseTE <- Modified_trueER_DH1$DOSE
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH2_LDR")
+Modified_trueER_DH2 <- read.csv("True ER_ORR_LDR_DH2.csv")
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/ORR_include PFS truncation/True Positive ER_ORR_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+df.ER.IDQ <- read.csv("df_ER_IDQ.csv")
+ORR_responder <- df.ER.IDQ %>% filter(EVENT==1)
+
+# Calculate Q1, Q3, and IQR for DAY
+Q1 <- quantile(ORR_responder$DAY, 0.25)
+Q3 <- quantile(ORR_responder$DAY, 0.75)
+IQR <- Q3 - Q1
+
+# Define outliers as points below Q1 - 1.5*IQR or above Q3 + 1.5*IQR
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+# Identify outliers
+outliers <- ORR_responder %>% filter(DAY < lower_bound | DAY > upper_bound)
+outliers_ID <- outliers %>%pull(ID)
+Modified_onset <- ORR_responder %>% filter(!ID %in% outliers_ID) %>% slice_max(DAY, n = 1)
+Onset_day <- unique(Modified_onset$DAY)
+
+Analysis.PFS <-  df.exp %>%
+        mutate( EVENT = if_else(Tumor < 1.2 * TumorB, 0, 1),
+                LAST=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((EVENT == 0 & DAY < first_event_day) | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)%>% filter(LAST == 1)%>%
+         select(ID, DAY, EVENT)%>% rename(PFS=DAY, PFS.EVENT=EVENT)
+
+
+df.exp.PFStruncation <- data.frame()
+
+for (i in 1:1000) {
+  single <- Analysis.PFS$PFS[i]
+  rows_for_id <- df.exp[df.exp$ID == i, ]
+  rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+  max_row <- which.max(rows_for_id$DAY)
+  rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+  df.exp.PFStruncation <- bind_rows(df.exp.PFStruncation, rows_for_id)
+}
+
+
+df.ER <- df.exp.PFStruncation %>%
+        group_by(ID) %>%
+  
+        mutate( EVENT = if_else(Tumor < 0.7 * TumorB, 1, 0),
+                LAST=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((EVENT == 0 & DAY < first_event_day) | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis.modified <- df.ER %>% filter(LAST == 1)%>%
+           mutate(  DAY = case_when(
+           EVENT==1 ~ DAY,
+           EVENT==0 & DAY <= Onset_day ~ DAY,
+           EVENT==0 & DAY > Onset_day ~ Onset_day))%>%
+           select(ID, DAY,EVENT)
+
+df.ER.modified <- left_join(analysis.modified, df.exp, by = c("ID","DAY"))
+# df.exp.3 <- df.exp%>%filter(ID==3)
+
+df.ER_correct <-  left_join(df.ER.modified, First_day_conc, by = c("ID"))
+
+df.ER.IDQ <-df.ER_correct %>%
+  rename(avgDoseTE=avgDOSE,
+         CmaxOED=Cmax,
+         CtroughOED=Ctrough,
+         CavgOED=Cavg,
+         Cavg1WOED=Cavg1W,
+         Cavg2WOED=Cavg2W,
+         Cavg4WOED=Cavg4W)
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+write.csv(df.ER.IDQ, "df_ER_IDQ_Modified.csv", row.names = FALSE)
+
+logistic_regression_comparison <- function(df.ER.IDQ, TRUE_DH1, TRUE_DH2, x_var, y_var) {
+  # Ensure x variable is numeric for log scale
+ 
+  ggplot() +
+  
+     # Logistic regression line for current dataset
+    geom_smooth(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]], color = "Logistic Regression"), 
+                method = "glm", method.args = list(family = "binomial")) +
+    geom_point(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]]), 
+               shape = "|", alpha = 0.5) +
+    
+      # Original True ER line for DH2
+    geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+    geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+    geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"), 
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+    
+    # Original True ER line for DH1
+    geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+    geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.8),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of Event",
+      title = paste("Logistic Regression -", x_var),
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    coord_cartesian(xlim = c(0.1, NA)) +
+    scale_x_log10(labels = custom_log_labels) +
+    scale_color_manual(values = c("Logistic Regression" = "black","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+}
+
+## compare the true ER for DH1 and DH2
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+
+df.ER.IDQ <- read.csv("df_ER_IDQ_Modified.csv")
+
+Logiplot1 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "DOSE", "EVENT")
+Logiplot2 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "Ctrough1D", "EVENT")
+Logiplot3 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "Cavg1D", "EVENT")
+Logiplot4 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "CtroughOED", "EVENT")
+Logiplot5 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "CavgOED", "EVENT")
+Logiplot6 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "Cavg1WOED", "EVENT")
+Logiplot7 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "Cavg2WOED", "EVENT")
+Logiplot8 <- logistic_regression_comparison(df.ER.IDQ, Modified_trueER_DH1, Modified_trueER_DH2, "CavgTE", "EVENT")
+
+Logistic_comparison <- grid.arrange(Logiplot1, Logiplot2, Logiplot3, Logiplot4,Logiplot5,Logiplot6,Logiplot7, Logiplot8,ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR/True ER comparions_DH1&2_Modified.tiff",
+      plot = Logistic_comparison, 
+     width = 20, height = 8, dpi = 400, units = "in")
+```
+
+##2.2 Logistic plot_did not do the log transformation
+```{r}
+#input the true ER relationship dataset
+##input the true ER for dose DH1
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH1")
+True.ER <- read.csv("True ER_ORR.csv")
+True.ER$avgDoseTE <- True.ER$DOSE
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH2_LDR")
+
+TrueER_DH2 <- read.csv("True ER_ORR_LDR_DH2.csv")
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+df.ER.IDQ <- read.csv("df_ER_IDQ_Modified.csv")
+
+covariates <- c("Ctrough1D", "Cavg1D","CtroughOED", "CavgOED", "Cavg1WOED","CavgTE")
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+logistic_Results_plot <- lapply(logistic_formulas, function(formula) {
+  # Fit the model
+  model <- glm(formula, family = binomial(logit), data = df.ER.IDQ)
+  
+  # Get predicted values on the scale of log-odds (link = "logit") and convert to probabilities
+  predictions <- predict(model, type = "link", se.fit = TRUE)
+  
+  # Confidence intervals for predictions
+  lower_bound <- predictions$fit - 1.96 * predictions$se.fit
+  upper_bound <- predictions$fit + 1.96 * predictions$se.fit
+  
+  # Convert to probability scale
+  predicted_prob <- plogis(predictions$fit)
+  lower_prob <- plogis(lower_bound)
+  upper_prob <- plogis(upper_bound)
+  
+  # Return a data frame with the covariate values, predictions, and confidence intervals
+  data.frame(
+    Covariate = df.ER.IDQ[[all.vars(formula)[2]]],  # Extract covariate values
+    Predicted_Prob = predicted_prob,
+    Lower_Bound = lower_prob,
+    Upper_Bound = upper_prob
+  )
+})
+
+wb <- createWorkbook()
+for (i in seq_along(covariates)) {
+  addWorksheet(wb, covariates[i])  # Create a sheet named after the covariate
+  writeData(wb, sheet = covariates[i], logistic_Results_plot [[i]])  # Write the data frame to the sheet
+}
+
+summary(logistic_Results_plot)
+# Save the workbook to a file
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+saveWorkbook(wb, "logistic_regression_results_nolog_Modified.xlsx", overwrite = TRUE)
+
+# logistic_regression_comparison <- function(df, TRUE_DH1, TRUE_DH2, x_var, y_var) {
+#   # Ensure x variable is numeric for log scale
+#  
+#   ggplot() +
+#   
+#      # Logistic regression line for current dataset
+#     geom_line(data = df, aes(x = Covariate, y = Predicted_Prob, color = "Logistic Regression"), size=1.5) +
+#     geom_ribbon(data = df, aes( x = Covariate, ymin = Lower_Bound, ymax = Upper_Bound), alpha = 0.2, fill = "black") +
+#     
+#       # Original True ER line for DH2
+#     geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+#     geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+#     geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"), 
+#               vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+#     
+#     # Original True ER line for DH1
+#     geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+#     geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+#     geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE), 
+#               vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+#     
+#     custom_theme +
+#     theme(
+#       panel.background = element_rect(fill = "white", color = "black"),
+#       legend.background = element_rect(fill = "transparent"),
+#       legend.position = c(0.3, 0.8),
+#       legend.title = element_blank(),
+#       axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+#       axis.text.y = element_text(size = 12),
+#       axis.title = element_text(size = 12),
+#       plot.title = element_text(size = 14, hjust = 0.5),
+#       plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+#         ) +
+#     labs(
+#       x = x_var,
+#       y = "Probability of ORR Event",
+#       title = paste("Logistic Regression -", x_var),
+#       color = "Model"
+#     ) +
+#    coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+
+#     scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+#     scale_x_log10(labels = custom_log_labels) +
+#     scale_color_manual(values = c("Logistic Regression" = "black","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+# }
+# 
+# ## compare the true ER for DH1 and DH2
+# 
+# 
+# Logiplot1 <- logistic_regression_comparison(logistic_Results_plot$Ctrough1D, True.ER, TrueER_DH2, "Ctrough1D", "EVENT")
+# Logiplot2 <- logistic_regression_comparison(logistic_Results_plot$Cavg1D, True.ER, TrueER_DH2, "Cavg1D", "EVENT")
+# Logiplot3 <- logistic_regression_comparison(logistic_Results_plot$CtroughOED, True.ER, TrueER_DH2, "CtroughOED", "EVENT")
+# Logiplot4 <- logistic_regression_comparison(logistic_Results_plot$CavgOED, True.ER, TrueER_DH2, "CavgOED", "EVENT")
+# Logiplot5 <- logistic_regression_comparison(logistic_Results_plot$Cavg1WOED, True.ER, TrueER_DH2, "Cavg1WOED", "EVENT")
+# Logiplot6 <- logistic_regression_comparison(logistic_Results_plot$CavgTE, True.ER, TrueER_DH2, "CavgTE", "EVENT")
+# 
+# Logistic_comparison <- grid.arrange(Logiplot1, Logiplot2, Logiplot3, Logiplot4,Logiplot5,Logiplot6,ncol = 3)
+# 
+# ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR/True ER comparions_DH1&2_Modified_nolog.tiff",
+#       plot = Logistic_comparison, 
+#      width = 15, height = 8, dpi = 400, units = "in")
+
+```
+##2.3 Logistic plot_ do the log transformation
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH1")
+True.ER <- read.csv("True ER_ORR.csv")
+True.ER$avgDoseTE <- True.ER$DOSE
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH2_LDR")
+TrueER_DH2 <- read.csv("True ER_ORR_LDR_DH2.csv")
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+df.ER.IDQ <- read.csv("df_ER_IDQ_Modified.csv")
+
+covariates <- c("Ctrough1D", "Cavg1D","CtroughOED", "CavgOED", "Cavg1WOED","Cavg2WOED" , "CavgTE")
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~ log(', x, ')')))
+
+logistic_Results_plot <- lapply(logistic_formulas, function(formula) {
+  # Fit the model
+  model <- glm(formula, family = binomial(logit), data = df.ER.IDQ)
+  
+  # Get predicted values on the scale of log-odds (link = "logit") and convert to probabilities
+  predictions <- predict(model, type = "link", se.fit = TRUE)
+  
+  # Confidence intervals for predictions
+  lower_bound <- predictions$fit - 1.96 * predictions$se.fit
+  upper_bound <- predictions$fit + 1.96 * predictions$se.fit
+  
+  # Convert to probability scale
+  predicted_prob <- plogis(predictions$fit)
+  lower_prob <- plogis(lower_bound)
+  upper_prob <- plogis(upper_bound)
+  
+  # Return a data frame with the covariate values, predictions, and confidence intervals
+  data.frame(
+    Covariate = df.ER.IDQ[[all.vars(formula)[2]]],  # Extract covariate values
+    Predicted_Prob = predicted_prob,
+    Lower_Bound = lower_prob,
+    Upper_Bound = upper_prob
+  )
+})
+
+wb <- createWorkbook()
+for (i in seq_along(covariates)) {
+  addWorksheet(wb, covariates[i])  # Create a sheet named after the covariate
+  writeData(wb, sheet = covariates[i], logistic_Results_plot [[i]])  # Write the data frame to the sheet
+}
+
+# summary(logistic_Results_plot)
+# Save the workbook to a file
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+saveWorkbook(wb, "logistic_regression_results_log_Modified.xlsx", overwrite = TRUE)
+
+# logistic_regression_comparison <- function(df, TRUE_DH1, TRUE_DH2, x_var, y_var) {
+#   # Ensure x variable is numeric for log scale
+#  
+#   ggplot() +
+#   
+#      # Logistic regression line for current dataset
+#     geom_line(data = df, aes(x = Covariate, y = Predicted_Prob, color = "Logistic Regression"), size=1.5) +
+#     geom_ribbon(data = df, aes( x = Covariate, ymin = Lower_Bound, ymax = Upper_Bound), alpha = 0.2, fill = "black") +
+#     
+#       # Original True ER line for DH2
+#     geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+#     geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+#     geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"), 
+#               vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+#     
+#     # Original True ER line for DH1
+#     geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+#     geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+#     geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE), 
+#               vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+#     
+#     custom_theme +
+#     theme(
+#       panel.background = element_rect(fill = "white", color = "black"),
+#       legend.background = element_rect(fill = "transparent"),
+#       legend.position = c(0.3, 0.8),
+#       legend.title = element_blank(),
+#       axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+#       axis.text.y = element_text(size = 12),
+#       axis.title = element_text(size = 12),
+#       plot.title = element_text(size = 14, hjust = 0.5),
+#       plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+#         ) +
+#     labs(
+#       x = x_var,
+#       y = "Probability of ORR Event",
+#       title = paste("Logistic Regression -", x_var),
+#       color = "Model"
+#     ) +
+#    coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+
+#     scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+#     scale_x_log10(labels = custom_log_labels) +
+#     scale_color_manual(values = c("Logistic Regression" = "black","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+# }
+# 
+# ## compare the true ER for DH1 and DH2
+# 
+# Logiplot1 <- logistic_regression_comparison(logistic_Results_plot$Ctrough1D, True.ER, TrueER_DH2, "Ctrough1D", "EVENT")
+# Logiplot2 <- logistic_regression_comparison(logistic_Results_plot$Cavg1D, True.ER, TrueER_DH2, "Cavg1D", "EVENT")
+# Logiplot3 <- logistic_regression_comparison(logistic_Results_plot$CtroughOED, True.ER, TrueER_DH2, "CtroughOED", "EVENT")
+# Logiplot4 <- logistic_regression_comparison(logistic_Results_plot$CavgOED, True.ER, TrueER_DH2, "CavgOED", "EVENT")
+# Logiplot5 <- logistic_regression_comparison(logistic_Results_plot$Cavg1WOED, True.ER,TrueER_DH2, "Cavg1WOED", "EVENT")
+# Logiplot6 <- logistic_regression_comparison(logistic_Results_plot$CavgTE, True.ER, TrueER_DH2, "CavgTE", "EVENT")
+# 
+# Logistic_comparison <- grid.arrange(Logiplot1, Logiplot2, Logiplot3, Logiplot4,Logiplot5,Logiplot6,ncol = 3)
+# 
+# ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR/True ER comparions_DH1&2_Modified_log.tiff",
+#       plot = Logistic_comparison, 
+#      width = 15, height = 8, dpi = 400, units = "in")
+```
+
+#3 model comparision
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+df.ER.IDQ <- read.csv( "df_ER_IDQ_Modified.csv")
+
+covariates <- c( "Ctrough1D", "Cavg1D","CtroughOED", "CavgOED", "Cavg1WOED","CavgTE")
+
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+logistic_Results <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+logistic_result  <- logistic_analysis(logistic_Results,covariates)%>% 
+                    rownames_to_column(var = "Variable")
+
+
+logistic_formulas_log <- sapply(covariates, function(x) as.formula(paste('EVENT ~ log(', x, ')')))
+logistic_Results_log <- lapply(logistic_formulas_log, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+logistic_result_log  <- logistic_analysis(logistic_Results_log,covariates)%>% 
+                    rownames_to_column(var = "Variable")
+
+wb_model <- createWorkbook()
+addWorksheet(wb_model, "log transform")
+addWorksheet(wb_model, "no log transform")
+
+
+writeData(wb_model, sheet = "log transform", x = logistic_result_log)
+writeData(wb_model, sheet = "no log transform", x = logistic_result)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+saveWorkbook(wb_model, file = "model comparison_Modified.xlsx", overwrite = TRUE)
+```
+#4 Incorporate the observed values to compare the model performance 
+```{r}
+quantiles_Five <- function(data, column_name, labels = c("1", "2", "3", "4", "5")) {
+  quantiles <- quantile(data[[column_name]], probs = seq(0.2, 0.8, by = 0.2))
+  categorized_column <- cut(data[[column_name]],
+                            breaks = c(-Inf, quantiles, Inf),
+                            labels = labels,
+                            include.lowest = TRUE)
+  return(categorized_column)
+}
+
+my.theme = theme_bw() +
+  theme(plot.background  = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.text      = element_text(size = 7),
+        legend.title     = element_text(size = 7),
+        axis.title       = element_text(size = 18),
+        axis.text        = element_text(size = 12),
+        legend.key.width = unit(.5,"cm"))
+
+create_covariate_plot <- function(covariate_name) {
+  # Read data
+  setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+  file_path <- "logistic_regression_results_nolog_Modified.xlsx"
+  Prediction <- read_excel(file_path, sheet = covariate_name)
+  
+   setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+  file_path <- "logistic_regression_results_log_Modified.xlsx"
+  Prediction_log <- read_excel(file_path, sheet = covariate_name)
+  
+  # Calculate statistics
+  covariate_stats <- quantile(df.ER.IDQ[[covariate_name]], probs = c(0.05, 0.5, 0.95), na.rm = TRUE)
+  names(covariate_stats) <- c("p05", "med", "p95")
+  
+  # Prepare plot data
+  eff.stats <- df.ER.IDQ %>%
+    group_by(!!sym(paste0(covariate_name, "_IDQ"))) %>%
+    summarise(N = n(),
+              NResp = sum(EVENT == 1),
+              Minimum = min(!!sym(covariate_name)),
+              Median = median(!!sym(covariate_name)),
+              Maximum = max(!!sym(covariate_name)),
+              ObsProb = round(NResp / N, 4)) %>%
+    mutate(bins = paste0(row_number(), "^", c("st", "nd", "rd", rep("th", n() - 3)), "^ quartile")) %>%
+    select(bins, N, Minimum, Median, Maximum, NResp, ObsProb) %>%
+    group_by(bins) %>%
+    mutate(exact.lower = binom.test(NResp, N)$conf.int[1],
+           exact.upper = binom.test(NResp, N)$conf.int[2]) %>%
+    as.data.frame()
+  
+  # Create plot
+  p <- ggplot() +
+    geom_jitter(data = df.ER.IDQ, aes(x = !!sym(covariate_name), y = EVENT, color = "Observation"), alpha = 0.2, size = 1, height = 0.03) +
+    
+       # Original True ER line for DH2
+    geom_line(data = TRUE_DH2, aes(x = !!sym(covariate_name), y =  EVENT, color = "True ER_DH2"), size = 1.5) +
+    geom_point(data = TRUE_DH2, aes(x = !!sym(covariate_name), y =  EVENT, color = "True ER_DH2"), size = 2) +
+    geom_text(data = TRUE_DH2, aes(x = !!sym(covariate_name), y =  EVENT, label = DOSE, color = "True ER_DH2"), 
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+    
+    # Original True ER line for DH1
+    geom_line(data = TRUE_DH1, aes(x = !!sym(covariate_name), y =  EVENT, color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = TRUE_DH1, aes(x = !!sym(covariate_name), y =  EVENT, color = "True ER_DH1"), size = 2) +
+    geom_text(data = TRUE_DH1, aes(x = !!sym(covariate_name), y =  EVENT, label = DOSE), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    
+    geom_line(data = Prediction, aes(x = Covariate, y = Predicted_Prob, color = "No log transformation"), size = 1.5) +
+    geom_ribbon(data = Prediction, aes(x = Covariate, ymin = Lower_Bound, ymax = Upper_Bound), alpha = 0.2, fill = "#00BFC4") +
+    
+    
+    geom_line(data = Prediction_log, aes(x = Covariate, y = Predicted_Prob, color = "Log transformation"), size = 1.5) +
+    geom_ribbon(data = Prediction_log, aes(x = Covariate, ymin = Lower_Bound, ymax = Upper_Bound), alpha = 0.2, fill = "#F8766D") +
+    
+    geom_errorbar(data = eff.stats, aes(x = Median, ymin = exact.lower, ymax = exact.upper), size = 1.1, width = 0.1) +
+    geom_point(data = eff.stats, aes(x = Median, y = ObsProb), size = 2) +
+    geom_segment(aes(x = min(eff.stats$Minimum), xend = max(eff.stats$Maximum), y = -0.05, yend = -0.05), size = 1.1) +
+    geom_segment(data = eff.stats, aes(x = Minimum, xend = Minimum, y = -0.07, yend = -0.03), size = 1.1) +
+    geom_segment(data = eff.stats[nrow(eff.stats), ], aes(x = Maximum, xend = Maximum, y = -0.07, yend = -0.03), size = 1.1) +
+    geom_vline(xintercept = covariate_stats["med"], linetype = 'solid') +
+    geom_vline(xintercept = covariate_stats["p05"], linetype = 'dashed') +
+    geom_vline(xintercept = covariate_stats["p95"], linetype = 'dashed') +
+    scale_color_manual(values = c("Observation" = "black", "No log transformation" = "#00BFC4", "Log transformation" = "#F8766D","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen")) +
+    my.theme +
+    xlab(covariate_name) + 
+    ylab("Probability of Responder") +
+    ggtitle(paste("Model comparison: log vs no log -", covariate_name)) +
+    theme(
+      legend.position = c(0.7, 0.3),
+      legend.background = element_rect(fill = "transparent"),
+      legend.title = element_blank(),
+      legend.text = element_text(size = 9),
+      legend.key.size = unit(0.5, "cm"),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+    )
+  
+  return(p)
+}
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH1")
+TRUE_DH1 <- read.csv("True ER_ORR.csv")
+TRUE_DH1$avgDoseTE <- TRUE_DH1$DOSE
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/True ER relationship/DH2_LDR")
+TRUE_DH2 <- read.csv("True ER_ORR_LDR_DH2.csv")
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR")
+df.ER.IDQ <- read.csv("df_ER_IDQ_Modified.csv")
+
+df.ER.IDQ$Ctrough1D_IDQ  <- quantiles_Five(df.ER.IDQ, "Ctrough1D")
+df.ER.IDQ$CtroughOED_IDQ  <- quantiles_Five(df.ER.IDQ, "CtroughOED")
+df.ER.IDQ$Cavg1D_IDQ  <- quantiles_Five(df.ER.IDQ, "Cavg1D")
+df.ER.IDQ$CavgOED_IDQ  <- quantiles_Five(df.ER.IDQ, "CavgOED")
+df.ER.IDQ$Cavg1WOED_IDQ  <- quantiles_Five(df.ER.IDQ, "Cavg1WOED")
+df.ER.IDQ$Cavg2WOED_IDQ  <- quantiles_Five(df.ER.IDQ, "Cavg2WOED")
+df.ER.IDQ$CavgTE_IDQ  <- quantiles_Five(df.ER.IDQ, "CavgTE")
+
+plot_Ctrough1D <- create_covariate_plot("Ctrough1D")
+plot_Cavg1D <- create_covariate_plot("Cavg1D")
+plot_Cavg1WOED <- create_covariate_plot("Cavg1WOED")
+plot_CtroughOED <- create_covariate_plot("CtroughOED")
+plot_CavgOED <- create_covariate_plot("CavgOED")
+plot_CavgTE <- create_covariate_plot("CavgTE")
+
+plot_Ctrough1D_L <- create_covariate_plot("Ctrough1D")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+ theme(legend.position = c(0.3, 0.7))
+plot_Cavg1D_L <- create_covariate_plot("Cavg1D")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+ theme(legend.position = c(0.3, 0.7))
+plot_Cavg1WOED_L <- create_covariate_plot("Cavg1WOED")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+ theme(legend.position = c(0.3, 0.7))
+plot_CtroughOED_L <- create_covariate_plot("CtroughOED")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+ theme(legend.position = c(0.3, 0.7))
+plot_CavgOED_L <- create_covariate_plot("CavgOED")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+ theme(legend.position = c(0.3, 0.7))
+plot_CavgTE_L <- create_covariate_plot("CavgTE")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+ theme(legend.position = c(0.3, 0.7))
+
+model_comparison <- grid.arrange(plot_Ctrough1D, plot_Cavg1D, plot_Cavg1WOED, plot_CtroughOED,plot_CavgOED,plot_CavgTE,ncol = 3)
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR/model comparision results_linear_5.tiff",
+      plot = model_comparison, 
+     width = 15, height = 8, dpi = 400, units = "in")
+
+model_comparison_L <- grid.arrange(plot_Ctrough1D_L, plot_Cavg1D_L, plot_Cavg1WOED_L, plot_CtroughOED_L,plot_CavgOED_L,plot_CavgTE_L,ncol = 3)
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis_manuscript1/Modified_1D_include PFS truncation/True Positive ER_Modified_DH2_HL24_ID20871_ii24_60&40&20_LDR/model comparision results_log_5.tiff",
+      plot = model_comparison_L, 
+     width = 15, height = 8, dpi = 400, units = "in")
+
+```

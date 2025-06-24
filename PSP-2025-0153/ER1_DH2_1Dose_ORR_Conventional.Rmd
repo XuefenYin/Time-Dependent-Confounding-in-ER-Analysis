@@ -1,0 +1,1161 @@
+---
+title: "ER1_DH2(Dynamic dosing)_ORR"
+author: "Xuefen Yin"
+date: "2024-12-2"
+output: html_document
+---
+
+#1 R setup
+```{r setup, echo = F}
+# knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+rm(list=ls(all=TRUE))
+
+library(tidyverse)
+library(mrgsolve)
+library(ggplot2)
+library(gridExtra)
+library(survival)
+library(survminer)
+library(ggExtra)
+# library(patchwork)
+library(ggridges)
+library(purrr)
+library(grid)
+library(cowplot)
+library(openxlsx)
+# library(brms) ## Emax
+library(broom)
+library(readxl)
+library(zoo)
+
+new_path <- paste("C:/rtools44/usr/bin", "C:/rtools44/mingw64/bin", Sys.getenv("PATH"), sep=";")
+Sys.setenv(PATH = new_path)
+
+theme_set(theme_bw())
+
+custom_theme <- theme_classic() +
+  theme(
+    panel.grid.major = element_line(color = "gray70", linewidth = 0.5),  # Major grid lines
+    panel.grid.minor = element_line(color = "gray90", linewidth = 0.25)  # Minor grid lines
+  )
+
+custom_log_labels <- function(x) {
+  ifelse(x < 10, 
+         sprintf("%.1f", x),  # One decimal place for numbers < 10
+         sprintf("%.0f", x))  # No decimal places for numbers >= 10
+}
+
+my.theme = theme_bw() +
+  theme(plot.background  = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.text      = element_text(size = 7),
+        legend.title     = element_text(size = 7),
+        axis.title       = element_text(size = 18),
+        axis.text        = element_text(size = 12),
+        legend.key.width = unit(.5,"cm"))
+
+quantiles_Five <- function(data, column_name, labels = c("1", "2", "3", "4", "5")) {
+  quantiles <- quantile(data[[column_name]], probs = seq(0.2, 0.8, by = 0.2))
+  categorized_column <- cut(data[[column_name]],
+                            breaks = c(-Inf, quantiles, Inf),
+                            labels = labels,
+                            include.lowest = TRUE)
+  return(categorized_column)
+}
+
+# used for loop function
+logistic_analysis <- function(logistic_Results, covariates) {
+  logistic_summaries <- lapply(logistic_Results, summary)
+  
+  logistic.results <- lapply(seq_along(logistic_summaries), function(i) {
+    x <- logistic_summaries[[i]]
+    P.value <- signif(x$coefficients[2, 4], digits=3)
+    Slope <- signif(x$coefficients[2, 1], digits=3)
+    AIC <- round(AIC(logistic_Results[[i]]), 1)   
+    res <- c(Slope, AIC, P.value)
+    names(res) <- c("Slope","AIC", "P.Value")
+    return(res)
+  })
+  
+  result_df <- as.data.frame(do.call(rbind, logistic.results))
+  row.names(result_df) <- covariates  
+  
+  return(result_df)
+}
+
+```
+#2_1  Generate the df.exp and df.ER.IDQ(run2_1 or 2_2)
+- Can used the results generateed by "ER1_DH2_1Dose_BOR.Rmd", saved in "ER2_DH2_AE_HL24_ii24"
+##2.1 Generate df.exp
+```{r echo=FALSE}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis")
+##input the PKPD individual parameters
+idata.PKPD <- read.csv("PKPD Baseline.csv")
+# mrgsolve model
+PKPD_model<- mread_cache("PKPD_tumor_DH2_AE_LDR.mod") 
+
+HDOSE <- 60
+MDOSE <- 40
+LDOSE <- 20
+
+# Generate dose_label
+dose_label <- c("0mg", paste0(c(LDOSE, MDOSE, HDOSE), "mg"))
+# Generate legend.labels_dose
+legend.labels_dose <- paste0("Q", 1:4, ": ", dose_label)
+
+idata.PKPD.dose <-  idata.PKPD%>%
+                     mutate(DOSEI=HDOSE,
+                       DOSEII=MDOSE,
+                       DOSEIII=LDOSE)%>%
+                     rename(EMAX=emax, EC50= ec50, Ktol=ktol)
+  
+ID.MAX <-max(idata.PKPD$ID)
+
+evnt <- ev(amt=0, ii=24, ID=1:ID.MAX)
+
+set.seed(20817)
+out.pkpd <- PKPD_model%>%
+            idata_set(idata.PKPD.dose)%>%
+            ev(evnt)%>%
+            mrgsim(
+               tgrid = c(seq(0, 24*600, by = 1)),
+               carry.out = "EVID", 
+               recsort = 3,
+               atol = 1e-12,
+               rtol = 1e-10 )
+
+out_df <- as.data.frame(out.pkpd)
+
+# calculate the exposure metrics
+exp <- out_df %>% 
+  filter(EVID == 0) %>%
+  select(-EVID,-GUT,-CENT,-PERIPH,-KA, -V2, -Q, -V3, -TR, -LPBase, -LPSlope)%>%
+  mutate(DAY = ceiling(time/24),
+         CP = if_else(CP < 0, 0, CP), # replace the really small CP to 0
+         AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+  filter(time > 0)%>%
+  mutate(CavgTE = AUC/time)%>%  # average concentration time to event
+  group_by(ID, DAY) %>%
+  mutate(Cmax = max(CP),
+         Ctrough = tail(CP,1)) %>%
+  rename(DOSE=Dose) %>%
+  ungroup() 
+  
+ #used to plot the first dosing interval profile
+exp.1.hour<- exp %>%
+          rename(TumorB= Tumor_0,
+                 AUCTE=AUC,
+                 Kgrow=KG,
+                 kdecay=KD)%>%
+          select(ID,DAY,DOSE, AE,time,CL,TumorB, Kgrow, kdecay, EMAX, EC50, Ktol, Tumor, CP,Cmax,Ctrough,AUCTE,CavgTE)
+
+# used to conduct ER analysis 
+exp.1<- exp.1.hour%>% filter(time %% 24 == 0)
+
+AUC1D <- exp.1 %>%
+  group_by(ID) %>%
+  # Calculate the last AUCTE for each day for each ID
+  group_by(DAY, .add = TRUE) %>%
+  summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+  # Calculate daily AUC for each ID
+  group_by(ID) %>%
+  mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+  ungroup()%>%
+  select(-LastAUCTE)%>%
+  mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+Combined.data <- left_join(exp.1, AUC1D, by = c("ID", "DAY"))
+
+# calculate all possible necessary exposure matrix
+exp.2 <- Combined.data%>%
+  group_by(ID) %>%
+  mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+         AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+         AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+         AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+         Cavg = AUC1D / 24,
+         Cavg1W = AUC1W / (24*7),
+         Cavg2W = AUC2W / (24*14),
+         Cavg3W = AUC3W / (24*21),
+         Cavg4W = AUC4W / (24*28)) %>%
+  ungroup()%>%
+  select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W)%>%
+  mutate(Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+         Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+         Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+         Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))
+
+exp.3 <- exp.2 %>%
+          group_by(ID) %>%
+          mutate(
+                Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28]),
+                CavgTE2WC1 = if_else(DAY > 14, CavgTE, Cavg2W[DAY == 14]),
+                CavgTE4WC1 = if_else(DAY > 28, CavgTE, Cavg4W[DAY == 28])
+                ) %>%
+          ungroup()
+
+## Calculate the accumulative average dose
+df.exp <- exp.3 %>%
+  group_by(ID) %>%
+  arrange(ID, DAY) %>%
+  mutate(CMDOSE = cumsum(DOSE)) %>%
+  ungroup() %>%
+  mutate(avgDOSE = CMDOSE/DAY) %>%
+  select(ID, DAY, DOSE,AE, CMDOSE, avgDOSE,  everything())
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+saveRDS(df.exp, file = "df_exp_200&100&60.rds")
+```
+##2.2 Generate df.ER.IDQ
+```{r}
+#using PFS to truncate the followup time for ORR
+Analysis.PFS <-  df.exp %>%
+        mutate( EVENT = if_else(Tumor < 1.2 * TumorB, 0, 1),
+                LAST=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((EVENT == 0 & DAY < first_event_day) | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)%>% filter(LAST == 1)%>%
+         select(ID, DAY, EVENT)%>% rename(PFS=DAY, PFS.EVENT=EVENT)
+
+
+df.exp.PFStruncation <- data.frame()
+
+for (i in 1:1000) {
+  single <- Analysis.PFS$PFS[i]
+  rows_for_id <- df.exp[df.exp$ID == i, ]
+  rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+  max_row <- which.max(rows_for_id$DAY)
+  rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+  df.exp.PFStruncation <- bind_rows(df.exp.PFStruncation, rows_for_id)
+}
+
+
+df.ER <- df.exp.PFStruncation %>%
+        group_by(ID) %>%
+  
+        mutate( EVENT = if_else(Tumor < 0.7 * TumorB, 1, 0),
+                LAST=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((EVENT == 0 & DAY < first_event_day) | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis <- df.ER %>% filter(LAST == 1)
+## Generate df.ER.IDQ for ORR(will used for loop function)
+df.ER.ID <- df.ER %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID <-  analysis[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ <- merge(df.ER.ID, G.ID, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+write.csv(df.ER.IDQ, "ORR_df_ER_IDQ_200&100&60.csv", row.names = FALSE)
+```
+#2_2 Directly input df.exp (run2_1 or 2_2)
+```{r}
+df.exp <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_200&100&60.rds")
+
+seed <- 20871
+
+HDOSE <- 200
+MDOSE <- 100
+LDOSE <- 60
+
+# Generate dose_label
+dose_label <- c("0mg", paste0(c(LDOSE, MDOSE, HDOSE), "mg"))
+```
+
+#3 Simulate time to event dataset(TTE)
+
+```{r}
+TTE.seed<- 2025
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+ORR.t <- read.csv("ORR_df_ER_IDQ_200&100&60.csv")
+
+event.number <- ceiling(mean(ORR.t$EVENT)* length(ORR.t$EVENT))
+censor.number <- length(ORR.t$EVENT) - event.number
+
+Event.t <- ORR.t %>% select(ID, DAY, EVENT) %>% filter(EVENT==1)%>% mutate(type = "Original")
+Censor.t <- ORR.t %>% select(ID, DAY, EVENT) %>% filter(EVENT==0)%>% mutate(type = "Original")
+# randomly selected days from the Event.t with replacement
+set.seed(TTE.seed)
+all_days <- Event.t %>% pull(DAY)
+sampled_days <- sample(all_days, size = event.number, replace = TRUE)
+
+Sample.event <- tibble(ID = 1:event.number) %>% 
+                mutate(DAY = sampled_days,
+                       EVENT=1,
+                       type = "Simulated") 
+
+set.seed(TTE.seed)
+all_days <- Censor.t %>% pull(DAY)
+sampled_days <- sample(all_days, size = censor.number, replace = TRUE)
+
+Sample.censor <- tibble(ID = 1:censor.number) %>% 
+                 mutate(DAY= sampled_days,
+                       EVENT=0,
+                       type = "Simulated") 
+
+
+# Combine original and simulated event times into one data frame
+event_data <- rbind(Event.t,Sample.event)
+
+# Create overlapping histograms
+his.plot<-ggplot(event_data, aes(x = DAY, fill = type)) +
+  geom_histogram(alpha = 0.3, position = "identity", bins = 50) +  
+  scale_fill_manual(values = c("Original" = "blue", "Simulated" = "red")) + 
+  labs(title = "Validation of Event Time distribution",
+       x = "Event Time",
+       y = "Count") +
+  theme_minimal()+
+   xlim(0, 600)+
+  theme(
+    legend.position      = c(0.8, 0.8),  
+    legend.background    = element_rect(fill = alpha("white", 0.7), color = NA)  
+  )
+
+box.plot<-ggplot(event_data, aes(x = type, y = DAY, fill = type)) +
+  geom_boxplot(alpha = 0.5, position = position_dodge(width = 0.75)) +  
+  scale_fill_manual(values = c("Original" = "blue", "Simulated" = "red")) +  # Set different color
+  labs(title = "Validation of Event Time distribution",
+       x = "Event Type",
+       y = "Event Time") +
+  theme_minimal() +
+  ylim(0, 600) 
+
+TTE.compare <- (his.plot | box.plot) +
+  plot_layout(ncol = 2, widths = c(4, 2))
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025/TTE distribution.tiff",
+      plot = TTE.compare,
+     width = 8, height = 3, dpi = 400, units = "in")
+
+Merge.t <- rbind(Sample.event, Sample.censor)
+set.seed(TTE.seed)  
+Merge.t <- Merge.t[sample(nrow(Merge.t)), ]
+Merge.t$ID <- 1:nrow(Merge.t)
+TTE <- Merge.t %>% select(-type)
+# 
+# summary(ORR.t)
+```
+
+#4 Create the df_ER_IDQ dataset for biased ER analysis
+##4.1 Creat df.ER.IDQ dataset
+
+-Merge the two dataset by ID
+```{r}
+df.ER <- data.frame()
+
+for (i in 1:1000) {
+  single <- TTE$DAY[i]
+  rows_for_id <- df.exp[df.exp$ID == i, ]
+  max_day <- max(rows_for_id$DAY, na.rm = TRUE)
+  
+  if (max_day < single) {
+    rows_for_id$EVENT <- 0
+    max_row <- which.max(rows_for_id$DAY)
+    rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+  } else {
+    #Cut off the extra data that Day > single
+    rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+    max_row <- which.max(rows_for_id$DAY)
+    #match the Event when TTE has censored values
+    rows_for_id$EVENT <- ifelse(1:nrow(rows_for_id) == max_row, TTE$EVENT[TTE$ID == i], 0)
+    rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+  }
+   df.ER <- bind_rows(df.ER, rows_for_id)
+}
+
+
+analysis <- df.ER %>% filter(LAST == 1)
+
+First_day_conc <- df.exp %>% filter(DAY==1)%>% select(ID, Ctrough, Cavg)%>% rename(Ctrough1D=Ctrough, Cavg1D=Cavg)
+df.ER_correct <-  left_join(analysis, First_day_conc, by = c("ID"))
+
+df.ER.IDQ <-df.ER_correct %>%
+  rename(CmaxOED=Cmax,
+         CtroughOED=Ctrough,
+         CavgOED=Cavg,
+         Cavg1WOED=Cavg1W,
+         Cavg2WOED=Cavg2W,
+         Cavg4WOED=Cavg4W)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+write.csv(df.ER.IDQ, "df_ER_IDQ_update.csv", row.names = FALSE)
+saveRDS(df.exp, file = "df_exp.rds")
+
+```
+##4.2  event% vs % of each dose level_ORR
+Note: the dosing history plot for ORR and PFS are different due to the dataset df.ER is cut off at different day for each ID.
+
+```{r eval=FALSE, include=FALSE}
+
+ # Count and prepare totals
+ EventDATA <- analysis %>% select(DAY, EVENT)%>% arrange(DAY)
+ Utime <- unique(EventDATA$DAY)
+    
+# Number at risk and number of events at each time
+ ni <- sapply(Utime, function(t) sum(EventDATA$DAY >= t))
+ di <- sapply(Utime, function(t) sum(EventDATA$DAY == t & EventDATA$EVENT == 1))
+ Event_probs <- 1-cumprod(1-di/ni)
+
+CumEvent <- data.frame(DAY = Utime, PEvent = Event_probs* 100)
+# only select the event day to show the result
+ unique.eventday <-  analysis %>% filter(EVENT==1)%>% select(DAY)%>% distinct()
+ CumEvent_filtered <- CumEvent %>%filter(DAY %in% unique.eventday$DAY)        
+# Count and prepare totals
+DosehistG <- df.ER %>%
+  select(ID, DOSE,DAY) %>%
+  count(DAY, DOSE, name = "freq") %>%
+  group_by(DAY) %>%
+  mutate(TOTAL = sum(freq)) %>%
+  ungroup()%>%
+  mutate(percentage = (freq / TOTAL) * 100)%>%
+  mutate(DOSE = as.factor(DOSE))
+
+
+DE.plot <- ggplot() +
+   geom_col(data = CumEvent_filtered, aes(x = DAY, y = PEvent), color = "grey40", fill = "grey40", alpha = 0.01) + 
+   geom_line(data = DosehistG, aes(x = DAY, y = percentage, group = DOSE, color = DOSE), size = 1) +
+   scale_x_continuous(name = "Days since first dose") +
+   scale_y_continuous(name = "Failure probability", sec.axis = sec_axis(~ . * 1, name = "% of dose level")) +
+   ggtitle("Dose vs event summary plot") +
+   scale_color_discrete(name = "Dose", labels = dose_label) +
+   custom_theme +
+   theme(legend.title = element_blank(),
+         legend.text = element_text(size = 12),
+         plot.title = element_text(size = 14, hjust = 0.5, vjust = 0.5),
+         axis.text.x = element_text(size = 10),
+         axis.text.y = element_text(size = 10),
+         axis.title.x = element_text(hjust = 0.5, size = 12),
+         axis.title.y = element_text(hjust = 0.5, size = 12))
+
+DE.plot
+
+DE.PLOT2<- DE.plot + xlim(0, 150)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025/Dose vs event summary plot_update.tiff",
+             plot = DE.plot, 
+             width = 5, height = 3, dpi = 400, units = "in")
+
+```
+
+#5 Model performance comparison
+
+###5.1 generate plots_did not consider log transformation
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+df.ER.IDQ <- read.csv("df_ER_IDQ_update.csv")
+
+## get the prediction results
+covariates <- c( "Ctrough1D", "Cavg1D","CtroughOED", "CavgOED", "Cavg1WOED","CavgTE")
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+logistic_Results_plot <- lapply(logistic_formulas, function(formula) {
+  # Fit the logistic regression model
+  model <- glm(formula, family = binomial(), data = df.ER.IDQ)
+  
+  # Extract the current covariate name
+  covariate <- all.vars(formula)[2]
+  
+  # Generate a sequence of x-values for the covariate
+  # Ensure that x-values are positive since log(x) is undefined for x <= 0
+  x_min <- max(0.1, min(df.ER.IDQ[[covariate]], na.rm = TRUE))  # Start from 0.1 to avoid log(0)
+  x_max <- max(df.ER.IDQ[[covariate]], na.rm = TRUE)
+  x_values <- seq(x_min, x_max, length.out = 500)  # 100 points for smooth curves
+  
+  # Create a new data frame for predictions
+  new_data <- data.frame(x_values)
+  names(new_data) <- covariate
+  
+  # Generate predictions on the logit (link) scale with standard errors
+  predictions <- predict(model, newdata = new_data, type = "link", se.fit = TRUE)
+  
+  # Calculate the lower and upper bounds on the logit scale
+  link_lower <- predictions$fit - 1.96 * predictions$se.fit
+  link_upper <- predictions$fit + 1.96 * predictions$se.fit
+  
+  # Transform the predictions and confidence intervals back to the probability scale
+  predicted_prob <- plogis(predictions$fit)
+  lower_prob <- plogis(link_lower)
+  upper_prob <- plogis(link_upper)
+  
+  # Return a data frame with the results
+  data.frame(
+    Covariate = x_values,
+    Predicted_Prob = predicted_prob,
+    Lower_Bound = lower_prob,
+    Upper_Bound = upper_prob
+  )
+})
+
+wb <- createWorkbook()
+for (i in seq_along(covariates)) {
+  addWorksheet(wb, covariates[i])  # Create a sheet named after the covariate
+  writeData(wb, sheet = covariates[i], logistic_Results_plot [[i]])  # Write the data frame to the sheet
+}
+
+
+# Save the workbook to a file
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+saveWorkbook(wb, "logistic_regression_results_nolog_update.xlsx", overwrite = TRUE)
+
+```
+###5.2 generate plots_consider log transformation
+
+```{r}
+## get the prediction results
+covariates <- c( "Ctrough1D", "Cavg1D","CtroughOED", "CavgOED", "Cavg1WOED", "CavgTE")
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~ log(', x, ')')))
+
+logistic_Results_plot <- lapply(logistic_formulas, function(formula) {
+  # Fit the logistic regression model
+  model <- glm(formula, family = binomial(), data = df.ER.IDQ)
+  
+  # Extract the current covariate name
+  covariate <- all.vars(formula)[2]
+  
+  # Generate a sequence of x-values for the covariate
+  # Ensure that x-values are positive since log(x) is undefined for x <= 0
+  x_min <- max(0.1, min(df.ER.IDQ[[covariate]], na.rm = TRUE))  # Start from 0.1 to avoid log(0)
+  x_max <- max(df.ER.IDQ[[covariate]], na.rm = TRUE)
+  x_values <- seq(x_min, x_max, length.out = 500)  # 100 points for smooth curves
+  
+  # Create a new data frame for predictions
+  new_data <- data.frame(x_values)
+  names(new_data) <- covariate
+  
+  # Generate predictions on the logit (link) scale with standard errors
+  predictions <- predict(model, newdata = new_data, type = "link", se.fit = TRUE)
+  
+  # Calculate the lower and upper bounds on the logit scale
+  link_lower <- predictions$fit - 1.96 * predictions$se.fit
+  link_upper <- predictions$fit + 1.96 * predictions$se.fit
+  
+  # Transform the predictions and confidence intervals back to the probability scale
+  predicted_prob <- plogis(predictions$fit)
+  lower_prob <- plogis(link_lower)
+  upper_prob <- plogis(link_upper)
+  
+  # Return a data frame with the results
+  data.frame(
+    Covariate = x_values,
+    Predicted_Prob = predicted_prob,
+    Lower_Bound = lower_prob,
+    Upper_Bound = upper_prob
+  )
+})
+
+wb <- createWorkbook()
+for (i in seq_along(covariates)) {
+  addWorksheet(wb, covariates[i])  # Create a sheet named after the covariate
+  writeData(wb, sheet = covariates[i], logistic_Results_plot [[i]])  # Write the data frame to the sheet
+}
+
+summary(logistic_Results_plot)
+# Save the workbook to a file
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+saveWorkbook(wb, "logistic_regression_results_log_update.xlsx", overwrite = TRUE)
+
+```
+
+##5.3 VPC_using 5 quantiles
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+df.ER.IDQ <- read.csv("df_ER_IDQ_update.csv")
+
+
+create_covariate_plot <- function(covariate_name) {
+  # Read data
+  setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+  file_path <- "logistic_regression_results_nolog_update.xlsx"
+  Prediction <- read_excel(file_path, sheet = covariate_name)
+  
+   setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+  file_path <- "logistic_regression_results_log_update.xlsx"
+  Prediction_log <- read_excel(file_path, sheet = covariate_name)
+  
+  # Calculate statistics
+  covariate_stats <- quantile(df.ER.IDQ[[covariate_name]], probs = c(0.05, 0.5, 0.95), na.rm = TRUE)
+  names(covariate_stats) <- c("p05", "med", "p95")
+  
+  # Prepare plot data
+  eff.stats <- df.ER.IDQ %>%
+    group_by(!!sym(paste0(covariate_name, "_IDQ"))) %>%
+    summarise(N = n(),
+              NResp = sum(EVENT == 1),
+              Minimum = min(!!sym(covariate_name)),
+              Median = median(!!sym(covariate_name)),
+              Maximum = max(!!sym(covariate_name)),
+              ObsProb = round(NResp / N, 4)) %>%
+    mutate(bins = paste0(row_number(), "^", c("st", "nd", "rd", rep("th", n() - 3)), "^ quartile")) %>%
+    select(bins, N, Minimum, Median, Maximum, NResp, ObsProb) %>%
+    group_by(bins) %>%
+    mutate(exact.lower = binom.test(NResp, N)$conf.int[1],
+           exact.upper = binom.test(NResp, N)$conf.int[2]) %>%
+    as.data.frame()
+  
+  # Create plot
+  p <- ggplot() +
+    geom_jitter(data = df.ER.IDQ, aes(x = !!sym(covariate_name), y = EVENT, color = "Observation"), alpha = 0.2, size = 1, height = 0.03) +
+    
+    geom_line(data = Prediction, aes(x = Covariate, y = Predicted_Prob, color = "No log transformation"), size = 1.5) +
+    geom_ribbon(data = Prediction, aes(x = Covariate, ymin = Lower_Bound, ymax = Upper_Bound), alpha = 0.2, fill = "blue") +
+    
+    
+    geom_line(data = Prediction_log, aes(x = Covariate, y = Predicted_Prob, color = "Log transformation"), size = 1.5) +
+    geom_ribbon(data = Prediction_log, aes(x = Covariate, ymin = Lower_Bound, ymax = Upper_Bound), alpha = 0.2, fill = "red") +
+    
+    geom_errorbar(data = eff.stats, aes(x = Median, ymin = exact.lower, ymax = exact.upper), size = 1.1, width = 0.1) +
+    geom_point(data = eff.stats, aes(x = Median, y = ObsProb), size = 2) +
+    geom_segment(aes(x = min(eff.stats$Minimum), xend = max(eff.stats$Maximum), y = -0.05, yend = -0.05), size = 1.1) +
+    geom_segment(data = eff.stats, aes(x = Minimum, xend = Minimum, y = -0.07, yend = -0.03), size = 1.1) +
+    geom_segment(data = eff.stats[nrow(eff.stats), ], aes(x = Maximum, xend = Maximum, y = -0.07, yend = -0.03), size = 1.1) +
+    geom_vline(xintercept = covariate_stats["med"], linetype = 'solid') +
+    geom_vline(xintercept = covariate_stats["p05"], linetype = 'dashed') +
+    geom_vline(xintercept = covariate_stats["p95"], linetype = 'dashed') +
+    scale_color_manual(values = c("Observation" = "black", "No log transformation" = "blue", "Log transformation" = "red")) +
+    my.theme +
+    xlab(covariate_name) + 
+    ylab("Probability of Responder") +
+    ggtitle(paste("Model comparison: log vs no log -", covariate_name)) +
+    theme(
+      legend.position = c(0.3, 0.3),
+      legend.background = element_rect(fill = "transparent"),
+      legend.title = element_blank(),
+      legend.text = element_text(size = 12),
+      legend.key.size = unit(0.5, "cm"),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+    )
+  
+  return(p)
+}
+
+# split dataset into 5 quantiles
+
+df.ER.IDQ$Ctrough1D_IDQ  <- quantiles_Five(df.ER.IDQ, "Ctrough1D")
+df.ER.IDQ$CtroughOED_IDQ  <- quantiles_Five(df.ER.IDQ, "CtroughOED")
+df.ER.IDQ$Cavg1D_IDQ  <- quantiles_Five(df.ER.IDQ, "Cavg1D")
+df.ER.IDQ$CavgOED_IDQ  <- quantiles_Five(df.ER.IDQ, "CavgOED")
+df.ER.IDQ$Cavg1WOED_IDQ  <- quantiles_Five(df.ER.IDQ, "Cavg1WOED")
+df.ER.IDQ$Cavg2WOED_IDQ  <- quantiles_Five(df.ER.IDQ, "Cavg2WOED")
+df.ER.IDQ$CavgTE_IDQ  <- quantiles_Five(df.ER.IDQ, "CavgTE")
+
+plot_Ctrough1D <- create_covariate_plot("Ctrough1D")
+plot_Cavg1D <- create_covariate_plot("Cavg1D")
+plot_Cavg1WOED <- create_covariate_plot("Cavg1WOED")
+plot_CtroughOED <- create_covariate_plot("CtroughOED")
+plot_CavgOED <- create_covariate_plot("CavgOED")
+plot_CavgTE <- create_covariate_plot("CavgTE")
+
+plot_Ctrough1D_L <- create_covariate_plot("Ctrough1D")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(10, NA))
+plot_Cavg1D_L <- create_covariate_plot("Cavg1D")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(10, NA))
+plot_Cavg1WOED_L <- create_covariate_plot("Cavg1WOED")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(10, NA))
+plot_CtroughOED_L <- create_covariate_plot("CtroughOED")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(10, NA))
+plot_CavgOED_L <- create_covariate_plot("CavgOED")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(10, NA))
+plot_CavgTE_L <- create_covariate_plot("CavgTE")+ scale_x_log10(labels = custom_log_labels) + coord_cartesian(ylim = c(0, 1), xlim = c(10, NA))
+
+model_comparison <- grid.arrange(plot_Ctrough1D, plot_Cavg1D, plot_Cavg1WOED, plot_CtroughOED,plot_CavgOED,plot_CavgTE,ncol = 3)
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025/model comparision results_linear_5_update.tiff",
+      plot = model_comparison, 
+     width = 15, height = 8, dpi = 400, units = "in")
+
+model_comparison_L <- grid.arrange(plot_Ctrough1D_L, plot_Cavg1D_L, plot_Cavg1WOED_L, plot_CtroughOED_L,plot_CavgOED_L,plot_CavgTE_L,ncol = 3)
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025/model comparision results_log_5_update.tiff",
+      plot = model_comparison_L, 
+     width = 15, height = 8, dpi = 400, units = "in")
+
+```
+##5.4 Obtain slope, AIC, and P value
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+df.ER.IDQ <- read.csv("df_ER_IDQ_update.csv")
+
+# abstract the slope, AIC and wald test
+covariates <- c( "Ctrough1D", "Cavg1D","CtroughOED", "CavgOED", "Cavg1WOED","CavgTE")
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+logistic_Results <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+logistic_result  <- logistic_analysis(logistic_Results,covariates)%>% 
+                    rownames_to_column(var = "Variable")
+
+
+logistic_formulas_log <- sapply(covariates, function(x) as.formula(paste('EVENT ~ log(', x, ')')))
+logistic_Results_log <- lapply(logistic_formulas_log, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+logistic_result_log  <- logistic_analysis(logistic_Results_log,covariates)%>% 
+                    rownames_to_column(var = "Variable")
+
+
+wb_model <- createWorkbook()
+addWorksheet(wb_model, "log transform")
+addWorksheet(wb_model, "no log transform")
+
+writeData(wb_model, sheet = "log transform", x = logistic_result_log)
+writeData(wb_model, sheet = "no log transform", x = logistic_result)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR/ER1_DH2_AE_HL24_ii24_200&100&60_2025")
+saveWorkbook(wb_model, file = "model comparison.xlsx", overwrite = TRUE)
+
+```
+
+#6.500 replications
+##6.1 loop_method5
+- generate 500 unique TTE datasets (the same calculation method as for a single simulation);
+- generate 500 df.exp dataset.
+```{r}
+set.seed(2025)
+seeds <- sample(10:10000, 500)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+ORR.t <- read.csv("ORR_df_ER_IDQ_200&100&60.csv")
+
+HDOSE <- 60
+MDOSE <- 40
+LDOSE <- 20
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis")
+PKPD_model<- mread_cache("PKPD_tumor_DH2_AE_LDR.mod") 
+idata.PKPD <- read.csv("PKPD Baseline.csv")
+idata.PKPD.dose <-  idata.PKPD%>%
+                     mutate(DOSEI=HDOSE,
+                       DOSEII=MDOSE,
+                       DOSEIII=LDOSE)%>%
+                     rename(EMAX=emax, EC50= ec50, Ktol=ktol)
+ID.MAX <-max(idata.PKPD$ID)
+evnt <- ev(amt=0, ii=24, ID=1:ID.MAX)
+
+logistic_results_list <- list()
+logistic_results_log_list <- list()
+
+for (seed in seeds) {
+     
+   # Bootstrap PK parameters for 1000 IDs
+       set.seed(seed)
+       ID.unique <- unique(idata.PKPD.dose$ID)
+       ID.bootstrap <- sample(ID.unique, 1000, replace = TRUE)
+
+       iparameter <- data.frame()
+
+       for (i in 1:length(ID.bootstrap)) {
+         id <- ID.bootstrap[i]
+         rows_for_id <- idata.PKPD.dose[idata.PKPD.dose$ID == id, ]
+         rows_for_id$NEWID <- i
+         iparameter<- bind_rows(iparameter, rows_for_id)
+       }
+
+       iparameter <- iparameter %>% select(-ID)%>%rename(ID=NEWID)
+
+      set.seed(seed)
+      out.pkpd <- PKPD_model%>%
+            idata_set(iparameter)%>%
+            ev(evnt)%>%
+            mrgsim(
+               tgrid = c(seq(0, 24*600, by = 1)),
+               carry.out = "EVID", 
+               recsort = 3,
+               atol = 1e-12,
+               rtol = 1e-10 )
+
+      out_df <- as.data.frame(out.pkpd)
+
+# calculate the exposure metrics
+      exp <- out_df %>% 
+          select(ID,time,EVID, Dose,CL, AUC, CP)%>%
+          filter(EVID == 0) %>%
+          filter(time %% 24 == 0)%>%
+          mutate(DAY = ceiling(time/24),
+                 CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+                 AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+          filter(time > 0)%>%
+          mutate(CavgTE = AUC/time)%>%  # average concentration time to event
+          group_by(ID, DAY) %>%
+          mutate(AUCTE=AUC,
+                 Cmax = max(CP),
+                 Ctrough = tail(CP,1)) %>%
+          ungroup() 
+  
+        AUC1D <- exp %>%
+          group_by(ID) %>%
+  # Calculate the last AUCTE for each day for each ID
+          group_by(DAY, .add = TRUE) %>%
+          summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+  # Calculate daily AUC for each ID
+          group_by(ID) %>%
+          mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+          ungroup()%>%
+          select(-LastAUCTE)%>%
+          mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+        Combined.data <- left_join(exp, AUC1D, by = c("ID", "DAY"))
+
+# calculate all possible necessary exposure matrix
+        df.exp <- Combined.data%>%
+                group_by(ID) %>%
+                mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+                AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+                AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+                AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+                Cavg = AUC1D / 24,
+                Cavg1W = AUC1W / (24*7),
+                Cavg2W = AUC2W / (24*14),
+                Cavg3W = AUC3W / (24*21),
+                Cavg4W = AUC4W / (24*28)) %>%
+         ungroup()%>%
+         mutate(AUC1W = ifelse(is.na(AUC1W), AUCTE, AUC1W),
+                AUC2W = ifelse(is.na(AUC2W), AUCTE, AUC2W),
+                AUC3W = ifelse(is.na(AUC3W), AUCTE, AUC3W),
+                AUC4W = ifelse(is.na(AUC4W), AUCTE, AUC4W),
+                Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+                Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+                Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+                Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))%>%
+         select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W,-Cavg3W)%>%
+                 group_by(ID) %>%
+                 mutate(Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                        Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                        Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28])) %>%
+                 ungroup()
+        
+  # generate TTE dataset
+    TTE.seed =seed
+    event.number <- ceiling(mean(ORR.t$EVENT)* length(ORR.t$EVENT))
+    censor.number <- length(ORR.t$EVENT) - event.number
+
+    Event.t <- ORR.t %>% select(ID, DAY, EVENT) %>% filter(EVENT==1)%>% mutate(type = "Original")
+    Censor.t <- ORR.t %>% select(ID, DAY, EVENT) %>% filter(EVENT==0)%>% mutate(type = "Original")
+   # randomly selected days from the Event.t with replacement
+    set.seed(TTE.seed)
+    all_days <- Event.t %>% pull(DAY)
+    sampled_days <- sample(all_days, size = event.number, replace = TRUE)
+
+    Sample.event <- tibble(ID = 1:event.number) %>% 
+                mutate(DAY = sampled_days,
+                       EVENT=1,
+                       type = "Simulated") 
+
+     set.seed(TTE.seed)
+    all_days <- Censor.t %>% pull(DAY)
+    sampled_days <- sample(all_days, size = censor.number, replace = TRUE)
+
+    Sample.censor <- tibble(ID = 1:censor.number) %>% 
+                 mutate(DAY= sampled_days,
+                       EVENT=0,
+                       type = "Simulated") 
+
+    Merge.t <- rbind(Sample.event, Sample.censor)
+    set.seed(TTE.seed)  
+    Merge.t <- Merge.t[sample(nrow(Merge.t)), ]
+    Merge.t$ID <- 1:nrow(Merge.t)
+    TTE <- Merge.t %>% select(-type)
+
+    df.ER <- data.frame()
+
+    for (i in 1:1000) {
+      single <- TTE$DAY[i]
+      rows_for_id <- df.exp[df.exp$ID == i, ]
+      max_day <- max(rows_for_id$DAY, na.rm = TRUE)
+  
+      if (max_day < single) {
+        rows_for_id$EVENT <- 0
+        max_row <- which.max(rows_for_id$DAY)
+        rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+      } else {
+        #Cut off the extra data that Day > single
+        rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+        max_row <- which.max(rows_for_id$DAY)
+        #match the Event when TTE has censored values
+        rows_for_id$EVENT <- ifelse(1:nrow(rows_for_id) == max_row, TTE$EVENT[TTE$ID == i], 0)
+        rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+      }
+        df.ER <- bind_rows(df.ER, rows_for_id)
+    }
+
+
+    analysis <- df.ER %>% filter(LAST == 1)
+
+    First_day_conc <- df.exp %>% filter(DAY==1)%>% select(ID, Ctrough, Cavg)%>% rename(Ctrough1D=Ctrough, Cavg1D=Cavg)
+    df.ER_correct <-  left_join(analysis, First_day_conc, by = c("ID"))
+
+    df.ER.IDQ <-df.ER_correct %>%
+                  rename(CmaxOED=Cmax,
+                         CtroughOED=Ctrough,
+                         CavgOED=Cavg,
+                         Cavg1WOED=Cavg1W,
+                         Cavg2WOED=Cavg2W,
+                         Cavg4WOED=Cavg4W)
+
+
+    # abstract the slope, AIC and wald test
+    covariates <- c( "Ctrough1D", "Cavg1D","CtroughOED", "CavgOED", "Cavg1WOED","CavgTE")
+    logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+    logistic_Results <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+    logistic_result  <- logistic_analysis(logistic_Results,covariates)%>% 
+                        rownames_to_column(var = "Variable")
+
+    logistic_formulas_log <- sapply(covariates, function(x) as.formula(paste('EVENT ~ log(', x, ')')))
+    logistic_Results_log <- lapply(logistic_formulas_log, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+    logistic_result_log  <- logistic_analysis(logistic_Results_log,covariates)%>% 
+                        rownames_to_column(var = "Variable")
+
+    logistic_results_list[[as.character(seed)]] <- logistic_result
+    logistic_results_log_list[[as.character(seed)]] <- logistic_result_log
+
+}
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR") 
+saveRDS(logistic_results_list, "logistic_results_60_m5_update.rds")
+saveRDS(logistic_results_log_list, "logistic_results_log_60_m5_update.rds")
+```
+
+##6.2 Result clearning and save
+### common functions
+```{r}
+Result_clean <- function(logistic_test) {
+  combined_results <- list()
+  
+  # Loop through each element in the logistic_test list
+  for (Seed in names(logistic_test)) {
+    df <- logistic_test[[Seed]]
+    df$Seed <- Seed
+    combined_results[[Seed]] <- df
+  }
+  
+  # Combine all the data.frames in the combined_results list into a single data.frame
+  combined_df <- do.call(rbind, combined_results)
+  combined_df <- combined_df[, c("Seed", "Variable", "Slope", "AIC", "P.Value")]
+  combined_df$Group <- ifelse(combined_df$P.Value >= 0.05, "p>=0.05", "p<0.05")
+  combined_df$Odd.ratio <- exp(combined_df$Slope)
+
+  return(combined_df)
+}
+
+# Abstract p values and summarize the statistical significance percentage
+summarize_pvalue_percentage <- function(data) {
+  con_var <- c("Ctrough1D","Cavg1D", "CtroughOED", "CavgOED", "Cavg1WOED", "CavgTE")
+  filtered_data <- data[data$Variable %in% con_var, ]
+  summary_df <- filtered_data %>%
+    group_by(Variable) %>%
+    summarise(
+      Total = n(),
+      Count_LT_0.05 = sum(P.Value < 0.05),
+      Percentage_LT_0.05 = (Count_LT_0.05 / Total) * 100
+    )
+  
+  # Return the summarized data frame
+  return(summary_df)
+}
+
+
+Median_95CI <- function(data) {
+  data %>%
+    group_by(Variable) %>%
+    summarise(
+      Mean = mean(Odd.ratio, na.rm = TRUE),
+      StdDev = sd(Odd.ratio, na.rm = TRUE),
+      n = sum(!is.na(Odd.ratio)),
+      Lower_95CI = ifelse(n > 1, Mean - 1.96 * (StdDev / sqrt(n)), NA),
+      Upper_95CI = ifelse(n > 1, Mean + 1.96 * (StdDev / sqrt(n)), NA),
+      Odd.ratio = median(Odd.ratio, na.rm = TRUE),
+      .groups = "drop"
+    ) 
+}
+
+```
+### clear and save
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR") 
+logistic_results_list <- readRDS("logistic_results_200_m5_update.rds")
+logistic_results_log_list <- readRDS("logistic_results_log_200_m5_update.rds")
+
+# clear the results
+logistic_results_df <- Result_clean(logistic_results_list)
+logistic_results_log_df <- Result_clean(logistic_results_log_list)
+
+# summary the p_value
+p_values_logistic_results <- summarize_pvalue_percentage(logistic_results_df)
+p_values_logistic_results_log <- summarize_pvalue_percentage(logistic_results_log_df)
+
+# summary the odd ratios
+Odd_logistic_results<- Median_95CI(logistic_results_df)
+Odd_logistic_results_log<- Median_95CI(logistic_results_log_df)
+
+# combine the results and save
+loop_logistic_summary <- left_join(p_values_logistic_results, Odd_logistic_results, by = "Variable")
+loop_logistic_log_summary <- left_join(p_values_logistic_results_log, Odd_logistic_results_log, by = "Variable")
+loop_logistic_summary <-loop_logistic_summary%>%
+                        select(Variable,n, Percentage_LT_0.05, Odd.ratio, Lower_95CI, Upper_95CI)%>%
+                        rename(`%(p<0.05)` = Percentage_LT_0.05)
+loop_logistic_log_summary <-loop_logistic_log_summary%>%
+                        select(Variable,n, Percentage_LT_0.05, Odd.ratio, Lower_95CI, Upper_95CI)%>%
+                        rename(`%(p<0.05)` = Percentage_LT_0.05)
+
+# Create a new workbook
+wb_summary <- createWorkbook()
+
+# Add sheets for no-log and log-transformation results
+addWorksheet(wb_summary, "summary_nolog")
+addWorksheet(wb_summary, "summary_log")
+addWorksheet(wb_summary, "results_nolog_df")
+addWorksheet(wb_summary, "results_log_df")
+
+# Write the summaries into the respective sheets
+writeData(wb_summary, sheet = "summary_nolog", x = loop_logistic_summary )
+writeData(wb_summary, sheet = "summary_log", x = loop_logistic_log_summary)
+writeData(wb_summary, sheet = "results_nolog_df", x = logistic_results_df)
+writeData(wb_summary, sheet = "results_log_df", x = logistic_results_log_df)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH2_1Dose_ORR") 
+saveWorkbook(wb_summary, file = "loop_summary_200_m5_update.xlsx", overwrite = TRUE)
+```
+
+#8 logistic plot(Emax model_N=1) with control group(Not limited to this case sinario)
+```{r}
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_1Dose/ER1_DH1_HL24_EO1_ii24")
+df.ER.IDQ <- read.csv("df_ER_IDQ.csv")
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis")
+df.ER.IDQ.Control <- read.csv("df_ER_IDQ_ORR_NOTreatment.csv")
+df.ER.IDQ.Control$DOSE_IDQ  <- 0
+merged_df.ER.IDQ <- bind_rows(df.ER.IDQ.Control, df.ER.IDQ)
+merged_df.ER.IDQ$avgDoseTE  <- 0
+
+
+random_seed <- 2024
+set.seed(random_seed)
+
+covariates <- c( "Ctrough1D", "Cavg1D", "CtroughOED", "CavgOED", "Cavg1WOED","CavgTE")
+# covariates <- c("Cavg1D")
+
+ wb <- createWorkbook()
+
+# Loop through each covariate
+for (cov in covariates) {
+  
+  # Define y_var based on covariate
+   y_var <- "EVENT"
+  
+  # Update the model formula
+  model <- bf(
+    as.formula(paste("EVENT ~ E0 + Emax *", cov, "/ (EC50 +", cov, ")")),
+    E0 + Emax + EC50 ~ 1,
+    nl = TRUE
+  )
+
+  # Define the priors
+  p <- prior(normal(10, 5), nlpar = "E0") +
+       prior(normal(50, 25), nlpar = "Emax") +
+       prior(normal(75, 50), nlpar = "EC50", lb = 0) 
+      
+  # Fit the model############Change data#########################
+  fit <- brm(
+    model,
+    prior = p,
+    data = merged_df.ER.IDQ,
+    cores = 4,
+    control = list(adapt_delta = .99)
+  )
+
+  # Create a sequence of x-values on a log scale
+  x_values <- seq(0.1, max(merged_df.ER.IDQ[[cov]]), by = 1)
+  newdata <- setNames(data.frame(x_values), cov)
+
+# posterior_epred gives expected values
+predictions <- posterior_epred(fit, newdata = newdata)
+
+# You can summarize the predictions (e.g., mean and credible intervals)
+summary_pred <- apply(predictions, 2, function(x) {
+  c(mean = mean(x), lower = quantile(x, 0.025), upper = quantile(x, 0.975))
+})
+
+summary_pred_df <- data.frame(
+  x_values = x_values,
+  mean = summary_pred["mean", ],
+  lower = summary_pred["lower.2.5%", ],
+  upper = summary_pred["upper.97.5%", ]
+)
+names(summary_pred_df)[names(summary_pred_df) == "lower.2.5%"] <- "lower"
+names(summary_pred_df)[names(summary_pred_df) == "upper.97.5%"] <- "upper"
+  
+  
+    # Create the plot object with all customizations
+  plot_obj <- ggplot(summary_pred_df, aes(x = x_values, y =  mean, color="Logistic Regression")) +
+    geom_line(size = 1) +
+   geom_ribbon(aes(ymin =  lower, ymax =  upper), alpha = 0.2, fill = "black") +
+   
+    custom_theme +
+      theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.8),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(x = cov, 
+         y = "Probability of Event",
+        title = paste("Logistic Regression(Emax) -", cov)) +
+    scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+    coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+
+    scale_x_log10(labels = custom_log_labels) +
+    scale_color_manual(values = c("Logistic Regression" = "black","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+
+  # Save the plot as a TIFF file
+  plot_file_name <- paste0(cov, ".tiff")
+  setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_1Dose/ER1_DH1_HL24_EO1_ii24/Emax_withcontrol")
+  ggsave(plot_file_name, plot = plot_obj, width = 5, height = 4, dpi = 400)
+  
+   saveRDS(fit, file = paste0("fit_", cov, ".rds"))
+  # Extract and save regression coefficients to Excel
+  coeffs <- as.data.frame(fixef(fit))  # Extract fixed effects coefficients
+  coeffs <- cbind(Parameter = rownames(coeffs), coeffs)  # Add a column for parameter names
+  rownames(coeffs) <- NULL  # Remove row names
+  addWorksheet(wb, cov)
+  writeData(wb, sheet = cov, coeffs)
+}
+
+# Save the Excel workbook
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_1Dose/ER1_DH1_HL24_EO1_ii24/Emax_withcontrol")
+saveWorkbook(wb, "regression_coefficients.xlsx", overwrite = TRUE)
+
+```
+
+

@@ -1,0 +1,1638 @@
+---
+title: "ER1_Constant dosing(DH1)with 2 DOSE levels"
+author: "Xuefen Yin"
+date: "2024-11-27"
+output: html_document
+---
+
+# About this file
+
+This analysis explores whether including a second dose level could mitigate the bias compared to using a single dose level.
+
+# R setup
+```{r setup, echo = F}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+rm(list=ls(all=TRUE))
+# install.packages("muhaz")
+library(tidyverse)
+library(mrgsolve)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(gridExtra)
+library(muhaz)
+library(zoo)
+library(openxlsx)
+
+new_path <- paste("C:/rtools44/usr/bin", "C:/rtools44/mingw64/bin", Sys.getenv("PATH"), sep=";")
+Sys.setenv(PATH = new_path)
+```
+#1 Common functions(run one time)
+
+##1.1 common function for plot
+```{r}
+theme_set(theme_bw())
+
+custom_theme <- theme_classic() +
+  theme(
+    panel.grid.major = element_line(color = "gray70", linewidth = 0.5),  # Major grid lines
+    panel.grid.minor = element_line(color = "gray90", linewidth = 0.25)  # Minor grid lines
+  )
+
+###1 logistic regression plots
+
+logistic_regression_plot <- function(data, predictor, response) {
+  # Ensure predictor is numeric for log scale
+  data[[predictor]] <- as.numeric(data[[predictor]])
+  
+  plot <- data %>%
+    ggplot(aes_string(x = predictor, y = response)) +
+    geom_point(shape = "|") +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    scale_x_log10() +
+    labs(x = predictor,
+         y = "Probability of Event",
+         title = paste("Logistic Regression -", predictor))
+  
+  return(plot)
+}
+
+###2 KM plot having 4 groups
+
+KM_plot_Q <- function(km_object, data, title_prefix, plot_x_scale = 600, save_path) {
+  plot <- ggsurvplot(
+    km_object,
+    data = data,
+    surv.median.line = "hv",
+    conf.int = TRUE,
+    #pval = TRUE,
+   # pval.method = TRUE,
+    risk.table = TRUE,
+    risk.table.y.text = FALSE,
+    tables.theme = theme_cleantable(),
+    tables.height = 0.25,
+    palette = c("red", "limegreen", "turquoise3", "blue2"),
+    legend.labs = c("Q1: 0-0.25", "Q2: 0.25-0.5", "Q3: 0.5-0.75", "Q4: 0.75-1"),
+    xlim = c(0, plot_x_scale)
+  )+ labs( y = "Probability of No Event",
+           x = "Days",
+          title = paste("True ER relationship -",title_prefix)) 
+
+   plot$plot <- plot$plot +
+   theme(plot.subtitle = element_text(size = 10))+
+   scale_x_continuous(breaks = seq(0, plot_x_scale, by = 50))
+   
+  # # Save the plot
+  # ggsave(filename = save_path, plot = plot$plot, width = 6, height = 5, dpi = 400, units = "in")
+  
+  return(plot)
+}
+
+#3. KM plot for the merged dataset
+KM_plot <- function(km_object, data, title_prefix,plot_x_scale = 600) {
+    plot <- ggsurvplot(
+    km_object,
+    surv.median.line = "hv", # Add median survival lines
+     color = "black", 
+     conf.int.fill = "grey45",
+     conf.int = TRUE,
+     title = "Kaplan-Meier plot for merged dataset",
+     xlab = "Days",
+     ylab = "Probability of no event",
+     xlim = c(0, plot_x_scale),
+     # risk.table = "abs_pct",
+     # risk.table.y.text = FALSE,
+     cumevents = TRUE,
+     cumcensor = TRUE,
+     tables.theme = theme_cleantable(),
+     tables.height = 0.15,
+     break.time.by = 30
+  )
+  
+    subtitle_text <- paste("event times has a Weibull distribution(shape=",event.shape, ",scale=",event.scale, ",seed=",seed, ");\ncensor times are randomly selected from 1:600 with =",seed+6,"; \nFix the length of dosing at 600 days, Bootstrap seed =",id.seed)
+    
+ plot$plot <- plot$plot +
+   labs(subtitle = subtitle_text) + 
+   theme(
+    plot.title = element_text(size = 14), 
+    plot.subtitle = element_text(size = 12), 
+    axis.title = element_text(size = 14), 
+    axis.text = element_text(size = 12) 
+  ) +
+  scale_x_continuous(breaks = seq(0, plot_x_scale, by = 30))+
+  theme(plot.title = element_text(hjust = 0.5))
+  
+  return(plot)
+}
+
+#4. typical CP plot
+CP_plot <- function(data, title) {
+  ggplot(data, aes(x = time, y = CP, color = as.factor(ID))) +
+    geom_point() +
+    geom_line() +
+    scale_y_log10() +
+    theme_classic() +
+    theme(
+      panel.background = element_rect(fill = "white"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    labs(x = "Time (hours)", y = "Concentration", title = title, color = "ID")
+}
+
+# 5. plot used to compare the accumulative event% with ID% of exposure metrics reach to SS
+Typical_plot <- function(data, y_var, title, patient_SS, CumEvent, FD) {
+  # Assuming CumEvent includes DAY and a column for cumulative percentage named PEvent
+  
+  # Merge the CumEvent data into the main data frame on the DAY column
+  # Ensure PEvent is scaled correctly if it's not already 0 to 100
+  data <- data %>%
+    left_join(CumEvent %>% select(DAY, PEvent), by = "DAY") %>%
+    left_join(FD %>% select(DAY, PNSS), by = "DAY")
+  
+  
+  # Determine the max value for y_var to set the primary y-axis limit
+  max_y_value <- max(data[[y_var]], na.rm = TRUE)
+  transformation_factor <- max_y_value * 1.1 / 100
+  
+  plot <- ggplot(data, aes(x = DAY)) +
+      
+      geom_col(data = CumEvent, aes(x = DAY, y = PEvent * transformation_factor), color = "red", fill = "red", alpha = 0.01)+ 
+     # geom_point(aes(y = !!sym(y_var)), color = "blue") +
+     #geom_point(aes(y = !!sym(y_var), color = as.factor(ID))) +
+     #geom_line(aes(y = !!sym(y_var), color = as.factor(ID)), size =2) +
+      geom_step(data = FD, aes(x = DAY, y = PNSS * transformation_factor), color = "limegreen", size = 2) +
+      geom_line(aes(y = !!sym(y_var)), color = "blue", size =2) +
+      scale_y_continuous(name = y_var, 
+                         limits = c(0, max_y_value * 1.1),  # Adjust the primary y-axis scale
+                         sec.axis = sec_axis(~ . / transformation_factor, name = "Cumulative Events%/ID% reach to SS")) + 
+      #geom_line(data = CumEvent, aes(x = DAY, y = PEvent*transformation_factor), color = "red", size=1) +
+     
+      theme_classic() +
+      theme(
+        panel.background = element_rect(fill = "white", color = "black"),
+        panel.grid.major.y = element_line(color = "grey"),
+        panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+        panel.grid.major.x = element_line(color = "grey"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none", 
+        plot.title = element_text(hjust = 0.5)
+      ) +
+      scale_color_brewer(palette = "Paired") +
+     labs(x = "Time (days)", y = y_var, title = title)
+    #labs(x = "Time (days)", y = y_var, title = title, color = "ID")
+
+  # Add vertical lines and annotations for first steady days
+ 
+   for(i in unique(patient_SS$P)) {
+      id_days <- patient_SS %>%
+      filter(P == i)
+    
+        plot <-  plot + 
+        geom_vline(xintercept = id_days$DAY, linetype = "dashed", color = "black") +
+        annotate("text", x =id_days$DAY, y = max_y_value/5, label = id_days$Day_perc, 
+                 vjust = 1.2, hjust = 0, size = 5, angle = 90,color = "black", fontface = "bold")
+    }
+  
+    
+  return(plot)
+}
+
+```
+
+##1.2 common function to manipulate the dataset
+```{r}
+#1.split the dataset into 4 groups
+
+quantiles <- function(data, column_name, labels = c("1", "2", "3", "4")) {
+  quantiles <- quantile(data[[column_name]], probs = c(0.25, 0.5, 0.75))
+  categorized_column <- cut(data[[column_name]], 
+                            breaks = c(-Inf, quantiles, Inf), 
+                            labels = labels, 
+                            include.lowest = TRUE)
+  return(categorized_column)
+}
+
+#2.perfrom the Mann-Whitney U-Test and save the result
+
+wilcox <- function(df_group1, df_group2, variables) {
+  # Initialize an empty data frame to store results
+  results_df <- data.frame(p_value = numeric(), stringsAsFactors = FALSE)
+  
+  for (var in variables) {
+    # Run the Wilcoxon test for the current variable
+    test_result <- wilcox.test(df_group1[[var]], df_group2[[var]], paired = FALSE, alternative = "two.sided",
+                               conf.int = TRUE, conf.level=0.95) # Note: corrected "confi.level" to "conf.level"
+    
+    # Append the variable name and p-value to the results dataframe
+     temp_result <- data.frame(P.Value = test_result$p.value, stringsAsFactors = FALSE)
+     rownames(temp_result) <- var
+     
+     results_df <- rbind(results_df, temp_result)
+  }
+  return(results_df)
+}
+
+#3.extract results from univariate Cox PH models_continuous
+
+univ_con <- function(univ_models) {
+    univ_results <- lapply(univ_models, function(x) {
+    x <- summary(x)  # Summarize the model
+    # Extract and format the results
+    P.value <- signif(x$wald["pvalue"], digits=3)
+    wald.test <- signif(x$wald["test"], digits=3)
+    beta <- signif(x$coef[1], digits=3)  # Coefficient beta
+    HR <- signif(exp(x$coef[1]), digits=3)  # Hazard Ratio (HR)
+    HR.confint.lower <- signif(x$conf.int[,"lower .95"], 3)
+    HR.confint.upper <- signif(x$conf.int[,"upper .95"], 3)
+    HR <- paste0(HR, " (",
+                 HR.confint.lower, "-", HR.confint.upper, ")")
+    res <- c(beta, HR, wald.test, P.value)
+    names(res) <- c("beta", "HR (95% CI for HR)", "wald.test", "P.Value")
+    return(res)
+  })
+  # Convert the list of results to a dataframe
+  result_df <- t(as.data.frame(univ_results))
+  return(result_df)
+}
+
+#4.extract results from univariate Cox PH models_continuous
+
+logistic_analysis <- function(logistic_Results, covariates) {
+  logistic_summaries <- lapply(logistic_Results, summary)
+  
+  logistic.results <- lapply(seq_along(logistic_summaries), function(i) {
+    x <- logistic_summaries[[i]]
+    P.value <- signif(x$coefficients[2, 4], digits=3)
+    Slope <- signif(x$coefficients[2, 1], digits=3)
+    AIC <- round(AIC(logistic_Results[[i]]), 1)   # Use the actual model object, not the summary
+    res <- c(Slope, AIC, P.value)
+    names(res) <- c("Slope","AIC", "P.Value")
+    return(res)
+  })
+  
+  # Convert the list of results to a dataframe
+  result_df <- as.data.frame(do.call(rbind, logistic.results))
+  row.names(result_df) <- covariates  # Add row names
+  
+  return(result_df)
+}
+
+#5.extract results from univariate Cox PH models_categorical
+
+univ_cat <- function(univ_models_G) {
+  
+          univ_results_G <- lapply(univ_models_G, function(x) { 
+          x <- summary(x)
+
+          # Extract Wald test p-value and statistic
+          P.value<-signif(x$wald["pvalue"], digits=2)
+          wald.test<-signif(x$wald["test"], digits=2)
+          beta <- numeric(length = 3)
+          HR <- numeric(length = 3)
+          HR.confint.lower <- numeric(length = 3)
+          HR.confint.upper <- numeric(length = 3)
+          HRs <- character(length = 3)
+  
+          for (i in 1:3) {
+            beta[i] <- signif(x$coef[i], digits = 3)
+            HR[i] <- signif(exp(x$coef[i]), digits = 3) # HR
+            HR.confint.lower[i] <- signif(x$conf.int[i,3],3)
+            HR.confint.upper[i] <- signif(x$conf.int[i,4],3)
+            HRs[i] <- paste0(HR[i], " (", HR.confint.lower[i], "-", HR.confint.upper[i], ")")
+            }
+           res <- c(beta, HRs, wald.test, P.value )
+           names(res) <- c(paste0("Beta", 1:3), paste0("HR (95% CI) ", 1:3), "Wald.Test", "P.Value")
+   
+           return(res)
+
+          })
+          # Convert the list of results to a dataframe
+          result_df <- t(as.data.frame(univ_results_G))
+          return(result_df)
+}  
+
+```
+#2 Generate the exposure dataset(df.exp)
+
+Model:"KP_2com.mod"
+
+1.input datasets: "estimated individual PK parameters.csv".
+
+2.Bootstrap 1000 individual PK parameters
+
+3.adjusted parameters in order to simulate 3 different cases
+
+-Case 1: Small molecule with a t1/2 ~ 7 to 8 h and tmax~3 h, dosed daily, reach to SS at day2; 
+         Need to adjust KA*20, CL*18;
+-Case 2: Small molecule with a t1/2 ~ 24 h and a tmax~ 5 h, dosed daily, reach to SS at day5;
+         Need to adjust KA*20, CL*5;
+-Case 3: Small molecule with a t1/2 ~ 2W, dosed every 2W or 4W, reach to SS at week10.
+        Need to adjust KA*3, CL/120,V2/40,V3/20,Q/50;
+        
+4.Run the simulation (Dosage fix at 60 mg for first 500ID, at 40/20mg for the last 500ID)
+
+5.Extract the exposure matrix for Biased ER analysis(ER1)
+      
+```{r echo=FALSE}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/Cabozantinib/ER analysis")
+parameter <- read.csv("estimated individual PK parameters.csv")
+
+mod<- mread_cache("KP_2com.mod") 
+
+DI = 14 # DAY
+Case.fix <- 3
+
+LDOSE <- 20
+UDOSE <- 60
+DoseT <- paste(LDOSE,"&",UDOSE,"mg")
+
+# random bootstrap the SUBJID with a fixed seed
+id.seed = 20871
+set.seed(id.seed)
+ID.unique <- unique(parameter$SUBJID) 
+ID.bootstrap <- sample(ID.unique, 1000, replace = TRUE)
+
+iparameter <- data.frame()
+
+for (i in 1:length(ID.bootstrap)) {
+  id <- ID.bootstrap[i]
+  rows_for_id <- parameter[parameter$SUBJID == id, ]
+  rows_for_id$NEWID <- i
+  iparameter<- bind_rows(iparameter, rows_for_id)
+}
+
+iparameter <- iparameter %>%
+               rename(ID=NEWID)
+
+
+if (Case.fix == 1) {
+    iparameter.allID <- iparameter%>%
+                     mutate(KA=KA*20,
+                     CL=CL*18)  
+
+} else if (Case.fix == 2) {
+    iparameter.allID <- iparameter%>%
+                     mutate(KA=KA*20,
+                     CL=CL*5)   
+} else if (Case.fix == 3) {
+    iparameter.allID <- iparameter%>%
+                     mutate(KA=KA*3,
+                     CL=CL/120, 
+                     V2=V2/40,
+                     V3=V3/30,
+                     Q=Q/50)  
+}
+
+## split the PK parameter dataset into two
+iparameter.allID.1 <- iparameter.allID %>% filter(ID <501)
+iparameter.allID.2 <- iparameter.allID %>% filter(ID >500)
+
+evnt_1 <- ev(amt=UDOSE,ii= DI*24,addl=599, ID=1:500)
+
+out_1 <- mod%>%
+       idata_set(iparameter.allID.1) %>%
+       ev(evnt_1)%>%
+       mrgsim(recover = c("CL","HD","CREAT","SUBJID"), 
+              carry.out = "EVID", 
+              recsort = 3,
+              atol = 1e-12, 
+              rtol = 1e-10,
+              tgrid = seq(0, 14400, by = 1))
+
+evnt_2 <- ev(amt=LDOSE,ii= DI*24,addl=599, ID=501:1000)
+
+out_2 <- mod%>%
+       idata_set(iparameter.allID.2) %>%
+       ev(evnt_2)%>%
+       mrgsim(recover = c("CL","HD","CREAT","SUBJID"), 
+              carry.out = "EVID", 
+              recsort = 3,
+              atol = 1e-12, 
+              rtol = 1e-10,
+              tgrid = seq(0, 14400, by = 1))
+
+exp_1 <- out_1 %>% 
+  as_tibble() %>% 
+  distinct() %>%
+  group_by(time) %>%
+  filter(EVID != 1) %>%
+  ungroup()%>%
+  mutate(DAY = ceiling(time/24),
+         CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+         AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+  filter(time > 0)%>%
+  mutate(Cavg = AUC/time)%>%  # average concentration time to event
+  group_by(ID, DAY) %>%
+  mutate(Cmax = max(CP),
+         Ctrough = tail(CP,1)) %>%
+  ungroup()%>%
+            mutate(DOSE = UDOSE)
+
+exp_2 <- out_2 %>% 
+  as_tibble() %>% 
+  distinct() %>%
+  group_by(time) %>%
+  filter(EVID != 1) %>%
+  ungroup()%>%
+  mutate(DAY = ceiling(time/24),
+         CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+         AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+  filter(time > 0)%>%
+  mutate(Cavg = AUC/time)%>%  # average concentration time to event
+  group_by(ID, DAY) %>%
+  mutate(Cmax = max(CP),
+         Ctrough = tail(CP,1)) %>%
+  ungroup()%>%
+            mutate(DOSE = LDOSE)
+
+exp.0 <- rbind(exp_1,exp_2)
+ 
+# clear the dataset 
+#used to plot the first dosing interval profile
+exp.1.hour<- exp.0 %>%
+          select(-EVID,-GUT,-CENT,-PERIPH)%>%
+          rename(AUCTE=AUC,
+                 CavgTE= Cavg)%>%
+          select(ID,SUBJID,DAY,time,DOSE,CL,CP,Cmax,Ctrough,AUCTE,CavgTE)%>%
+        #  filter(time %% 24 == 0)%>%
+          mutate(DOSE = if_else(is.na(DOSE), 0, DOSE))
+# used to conduct ER analysis 
+exp.1<- exp.1.hour%>%filter(time %% 24 == 0)
+
+# get the daily AUC
+AUC1D <- exp.1 %>%
+  arrange(ID, DAY) %>%
+  group_by(ID) %>%
+  # Calculate the last AUCTE for each day for each ID
+  group_by(DAY, .add = TRUE) %>%
+  summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+  # Calculate daily AUC for each ID
+  group_by(ID) %>%
+  mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+  ungroup()%>%
+  select(-LastAUCTE)%>%
+  mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+Combined.data <- left_join(exp.1, AUC1D, by = c("ID", "DAY"))
+
+# calculate all possible necessary exposure matrix
+exp.2 <- Combined.data%>%
+  group_by(ID) %>%
+  mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+         AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+         AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+         AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+         Cavg = AUC1D / 24,
+         Cavg1W = AUC1W / (24*7),
+         Cavg2W = AUC2W / (24*14),
+         Cavg3W = AUC3W / (24*21),
+         Cavg4W = AUC4W / (24*28)) %>%
+  ungroup()%>%
+  mutate(AUC1W = ifelse(is.na(AUC1W), AUCTE, AUC1W),
+         AUC2W = ifelse(is.na(AUC2W), AUCTE, AUC2W),
+         AUC3W = ifelse(is.na(AUC3W), AUCTE, AUC3W),
+         AUC4W = ifelse(is.na(AUC4W), AUCTE, AUC4W),
+         Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+         Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+         Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+         Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))
+
+# only maintain the exposure matrix used for ER analysis
+df.exp <- exp.2 %>%
+           select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W,-Cavg3W)
+
+df.exp <- df.exp %>%
+          group_by(ID) %>%
+          mutate(
+                Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28]),
+                CavgTE2WC1 = if_else(DAY > 14, CavgTE, Cavg2W[DAY == 14]),
+                CavgTE4WC1 = if_else(DAY > 28, CavgTE, Cavg4W[DAY == 28]),
+                CavgSS = max(tail(Cavg, n = min(100, length(Cavg)))),
+                Cavg1WSS = max(tail(Cavg1W, n = min(100, length(Cavg1W)))),
+                Cavg2WSS = max(tail(Cavg2W, n = min(100, length(Cavg2W)))),
+                Cavg4WSS = max(tail(Cavg4W, n = min(100, length(Cavg4W)))),
+                CavgTESS = max(tail(CavgTE, n = min(100, length(CavgTE))))
+                ) %>%
+          ungroup()
+
+```
+
+#3 Simulate time to event dataset(TTE)
+There scenarios will be explored:
+- EO1: shape = 0.65, scale = 100;
+- EO2: shape = 2, scale = 240;
+
+75% of records are event times, which has a weibull distribution
+- the hazard rate could be changed by using weibull distribution, 
+- when shape < 1; the hazard rate will decrease with the time
+- when shape = 1; it will reduce to exponential distribution, and has a constant hazard rate
+- when shape > 1; hazard rate will increase with the time
+- scale = 1/rate; used to adjust the hazard rate
+
+25% of records are censor times, which are randomly selected with replacement from the follow-up period
+
+Note: the maximum follow-up time is 600 days; the percentage of censor data is less than 10% before the median survial time.
+```{r}
+n.event = 750
+n.censor= 250
+plot_x_scale <- 600
+
+seed <- 123
+event.shape <-0.65
+event.scale <- 100
+set.seed(seed)
+Sample.event <- tibble(ID = 1:n.event) %>% 
+                mutate(time = 1 + ceiling(rweibull(n.event, shape = event.shape, scale = event.scale )),
+                       event=1) 
+
+set.seed(seed+6)
+censor.time <- sample(1:600, n.censor, replace = TRUE)
+
+Sample.censor <- tibble(ID = 1:n.censor) %>% 
+                mutate(time = censor.time,
+                       event=0) 
+
+merge.data <- rbind(Sample.event, Sample.censor)
+
+seed <- 123
+TTE <- merge.data %>% 
+       mutate(event = if_else(time > 600, 0, event),
+              ID = sample(1:1000, n(), replace = FALSE))%>% 
+       arrange(ID)
+
+```
+#4 Create the df.ER dataset for Biased ER_2D analysis
+
+- Create the df.ER dataset by integrating the TTE dataset into exposure metrics dataset(df.exp), aligning on time points.This process involves handling each ID individually and combining them sequentially. For each ID: 
+ 1. Extract all records for the selected ID;
+ 2. Determine the last day in the dosing record for this ID and compare it with its corresponding time point in the TTE dataset (for instance, ID=10 is matched with the TTE dataset's 10th time point);
+ 3. If the last dosing day is greater than or equal to the TTE time point, remove any data beyond this time and align the EVENT from TTE  with the new final day of the dosing record;
+ 4. If the last dosing day is less than the TTE time point, the EVENT is censored;
+ 
+- df.ER includes all the data records
+- analysis only include the last observation
+```{r}
+df.ER <- data.frame()
+
+for (i in 1:1000) {
+  single <- TTE$time[i]
+  rows_for_id <- df.exp[df.exp$ID == i, ]
+  max_day <- max(rows_for_id$DAY, na.rm = TRUE)
+  
+  if (max_day < single) {
+    rows_for_id$EVENT <- 0
+    max_row <- which.max(rows_for_id$DAY)
+    rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+  } else {
+    #Cut off the extra data that Day > single
+    rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+    max_row <- which.max(rows_for_id$DAY)
+    #match the Event when TTE has censored values
+    rows_for_id$EVENT <- ifelse(1:nrow(rows_for_id) == max_row, TTE$event[TTE$ID == i], 0)
+    rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+  }
+   df.ER <- bind_rows(df.ER, rows_for_id)
+}
+
+analysis <- df.ER %>% filter(LAST == 1)
+```
+
+#5 Conventional ER analysis
+##5.1 Creat KM plots (no strata)
+```{r}
+plot_x_scale <- 600
+time <- analysis$DAY
+event <- analysis$EVENT
+
+KM_fit <- survfit(Surv(time, event) ~ 1, data = analysis )
+plot<- KM_plot(KM_fit, analysis, "merged dataset", 600)
+
+p1 = plot$plot
+p2 = plot$cumevents
+p3 = plot$ncensor.plot
+plotp = cowplot::plot_grid(p1,p2,p3,align = "v",ncol =1,rel_heights = c(4,1,1))
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM plot_no strata.tiff",
+        plotp, 
+        width = 7, height = 5, dpi = 300, units = "in")
+
+```
+##5.2 Creat KM plots (on the grouped ID)
+```{r}
+# first day exposure
+df.ER.ID <- df.ER %>%
+            filter(DAY == 1) %>%
+            select(SUBJID, ID, DOSE, CL, Ctrough, Cavg, Cavg2WC1,Cavg4WC1 )%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID <-  analysis[,c("ID","DAY", "Ctrough","Cavg","CavgSS","Cavg1W","Cavg2W","Cavg2WC1","Cavg4WC1","CavgTE",     "CavgTE2WC1","CavgTE4WC1","Cavg2WSS","Cavg4WSS","EVENT","LAST")]%>%
+          rename(CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+
+df.ER.IDQ <- merge(df.ER.ID, G.ID, by = "ID")%>%
+             select(ID, SUBJID, DAY, DOSE, CL, LAST,EVENT, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgSS,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WSS,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WSS,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+  df.ER.IDQ$Ctrough1D_IDQ  <- quantiles(df.ER.IDQ, "Ctrough1D")
+  df.ER.IDQ$CtroughOED_IDQ  <- quantiles(df.ER.IDQ, "CtroughOED")
+
+  df.ER.IDQ$Cavg1D_IDQ  <- quantiles(df.ER.IDQ, "Cavg1D")
+  df.ER.IDQ$Cavg2WC1_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WC1")
+  df.ER.IDQ$Cavg4WC1_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WC1")
+
+  df.ER.IDQ$CavgSS_IDQ  <- quantiles(df.ER.IDQ, "CavgSS")
+  df.ER.IDQ$Cavg2WSS_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WSS")
+  df.ER.IDQ$Cavg4WSS_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WSS")
+
+  df.ER.IDQ$CavgOED_IDQ  <- quantiles(df.ER.IDQ, "CavgOED")
+  df.ER.IDQ$Cavg1WOED_IDQ  <- quantiles(df.ER.IDQ, "Cavg1WOED")
+  df.ER.IDQ$Cavg2WOED_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WOED")
+  df.ER.IDQ$Cavg2WC1OED_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WC1OED")
+  df.ER.IDQ$Cavg4WC1OED_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WC1OED")
+
+  df.ER.IDQ$CavgTE_IDQ  <- quantiles(df.ER.IDQ, "CavgTE")
+  df.ER.IDQ$CavgTE2WC1_IDQ  <- quantiles(df.ER.IDQ, "CavgTE2WC1")
+  df.ER.IDQ$CavgTE4WC1_IDQ  <- quantiles(df.ER.IDQ, "CavgTE4WC1")
+
+  KM.Ctrough1DIDQ <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = df.ER.IDQ )
+  KM.CtroughOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = df.ER.IDQ )
+  
+  KM.Cavg1DIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WC1IDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WC1_IDQ, data = df.ER.IDQ )
+  KM.Cavg4WC1IDQ <- survfit(Surv(DAY, EVENT) ~ Cavg4WC1_IDQ, data = df.ER.IDQ )
+
+  KM.CavgSSIDQ <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WSSIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WSS_IDQ, data = df.ER.IDQ )
+  KM.Cavg4WSSIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg4WSS_IDQ, data = df.ER.IDQ )
+
+  KM.CavgOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = df.ER.IDQ)
+  KM.Cavg1WOEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WOEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WOED_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WC1OEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WC1OED_IDQ, data = df.ER.IDQ )
+  KM.Cavg4WC1OEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg4WC1OED_IDQ, data = df.ER.IDQ )
+
+  KM.CavgTEIDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = df.ER.IDQ )
+  KM.CavgTE2WC1IDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE2WC1_IDQ, data = df.ER.IDQ )
+  KM.CavgTE4WC1IDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE4WC1_IDQ, data = df.ER.IDQ )
+
+
+if (DI == 1) {
+  
+plot1 <- KM_plot_Q(KM.Cavg1DIDQ, df.ER.IDQ,"Cavg1D_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg1D.tiff")
+
+plot2 <- KM_plot_Q(KM.CavgSSIDQ, df.ER.IDQ,"CavgSS_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_CavgSS.tiff")
+ 
+plot3 <- KM_plot_Q(KM.CavgOEDIDQ, df.ER.IDQ,"CavgOED_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_CavgOED.tiff")
+plot4 <- KM_plot_Q(KM.Cavg1WOEDIDQ, df.ER.IDQ,"Cavg1WOED_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg1WOED.tiff")
+
+plot5 <- KM_plot_Q(KM.Cavg2WOEDIDQ, df.ER.IDQ,"Cavg2WOED_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg2WOED.tiff")
+
+plot6 <- KM_plot_Q(KM.CavgTEIDQ, df.ER.IDQ,"CavgTE_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_CavgTE.tiff")
+
+combine_3 <- grid.arrange(plot1$plot, plot2$plot, plot3$plot, plot4$plot,plot5$plot, plot6$plot, ncol = 3)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM Plot 4 groups.tiff",
+      plot = combine_3, 
+     width = 18, height = 8, dpi = 400, units = "in") 
+  
+
+    } else if(DI == 14) {
+  
+
+plot1 <- KM_plot_Q(KM.Cavg2WC1IDQ, df.ER.IDQ,"Cavg2WC1_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg2WC1.tiff")
+
+plot2 <- KM_plot_Q(KM.Cavg2WSSIDQ, df.ER.IDQ,"Cavg2WSS_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg2WSS.tiff")
+
+plot3 <- KM_plot_Q(KM.Cavg2WC1OEDIDQ, df.ER.IDQ,"Cavg2WC1OED_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg2WOED.tiff")
+
+plot4 <- KM_plot_Q(KM.CavgTE2WC1IDQ, df.ER.IDQ,"CavgTE2WC1_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_CavgTE.tiff")
+
+combine_3 <- grid.arrange(plot1$plot, plot2$plot, plot3$plot, plot4$plot, ncol = 2)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM Plot 4 groups.tiff",
+      plot = combine_3, 
+     width = 12, height = 8, dpi = 400, units = "in")
+
+} else if(DI == 28) {
+  
+  
+plot1 <- KM_plot_Q(KM.Cavg4WC1IDQ, df.ER.IDQ,"Cavg4WC1_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg4WC1.tiff")
+
+plot2 <- KM_plot_Q(KM.Cavg4WSSIDQ, df.ER.IDQ,"Cavg4WSS_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg4WSS.tiff")
+
+plot3 <- KM_plot_Q(KM.Cavg4WC1OEDIDQ, df.ER.IDQ,"Cavg4WC1OED_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_Cavg4WOED.tiff")
+
+plot4 <- KM_plot_Q(KM.CavgTE4WC1IDQ, df.ER.IDQ,"CavgTE4WC1_IDQ",600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM_False_CavgTE.tiff")
+
+combine_3 <- grid.arrange(plot1$plot, plot2$plot, plot3$plot, plot4$plot, ncol = 2)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/KM Plot 4 groups.tiff",
+      plot = combine_3, 
+     width = 12, height = 8, dpi = 400, units = "in")
+
+}
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10")
+write.csv(df.ER.IDQ, "df.ER.IDQ.csv", row.names = FALSE)
+saveRDS(df.exp, file = "df_exp.rds")  
+```
+
+##5.3 Logistic regression plots
+
+```{r}
+
+if(DI == 1) {
+plot1 <- logistic_regression_plot(df.ER.IDQ, "Cavg1D", "EVENT")
+plot2 <- logistic_regression_plot(df.ER.IDQ, "CavgSS", "EVENT")
+plot3 <- logistic_regression_plot(df.ER.IDQ, "CavgOED", "EVENT")
+plot4 <- logistic_regression_plot(df.ER.IDQ, "Cavg1WOED", "EVENT")
+plot5 <- logistic_regression_plot(df.ER.IDQ, "Cavg2WOED", "EVENT")
+plot6 <- logistic_regression_plot(df.ER.IDQ, "CavgTE", "EVENT")
+
+combine_2 <- grid.arrange(plot1, plot2, plot3, plot4,plot5,plot6, ncol = 3)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/Logistic regression plot_conc.tiff",
+      plot = combine_2, 
+     width = 12, height = 6, dpi = 400, units = "in")
+
+} else if (DI == 14) {
+
+plot1 <- logistic_regression_plot(df.ER.IDQ, "Cavg2WC1", "EVENT")
+plot2 <- logistic_regression_plot(df.ER.IDQ, "Cavg2WSS", "EVENT")
+plot3 <- logistic_regression_plot(df.ER.IDQ, "Cavg2WC1OED", "EVENT")
+plot4 <- logistic_regression_plot(df.ER.IDQ, "CavgTE2WC1", "EVENT")
+
+combine_2 <- grid.arrange(plot1, plot2, plot3, plot4, ncol = 2)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/Logistic regression plot_conc.tiff",
+      plot = combine_2, 
+     width = 8, height = 6, dpi = 400, units = "in")
+
+} else if (DI == 28) {
+
+plot1 <- logistic_regression_plot(df.ER.IDQ, "Cavg4WC1", "EVENT")
+plot2 <- logistic_regression_plot(df.ER.IDQ, "Cavg4WSS", "EVENT")
+plot3 <- logistic_regression_plot(df.ER.IDQ, "Cavg4WC1OED", "EVENT")
+plot4 <- logistic_regression_plot(df.ER.IDQ, "CavgTE4WC1", "EVENT")
+
+combine_2 <- grid.arrange(plot1, plot2, plot3, plot4, ncol = 2)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/Logistic regression plot_conc.tiff",
+      plot = combine_2, 
+     width = 8, height = 6, dpi = 400, units = "in")
+}
+```
+
+##5.4 Conventional ER analysis tests
+
+```{r}
+# setwd( "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10") 
+# df.ER.IDQ <- read.csv("df_ER_IDQ.csv")
+# df.exp <- readRDS("df_exp.rds")
+
+#1. Perform Wilcox Test for the exposures grouped by IDs 
+## get the mean values for the exposures
+ID.e <- df.ER.IDQ %>% filter(EVENT==1)
+ID.n <- df.ER.IDQ %>% filter(EVENT==0)
+
+covariates <- colnames(df.ER.IDQ)[c(5,8:23)]
+wilcox_result <- wilcox(ID.e, ID.n, covariates)%>%rownames_to_column(var = "Variable")
+
+#2. univariate Cox PH regression_continuous covariate
+
+univ_formulas <- sapply(covariates, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+univ_models <- lapply(univ_formulas, function(x) { coxph(x, data = df.ER.IDQ) })
+univ_con_result <- univ_con(univ_models)%>%
+                   as.data.frame() %>%
+                  rownames_to_column(var = "Variable")
+
+#3. logistic regression analysis
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+logistic_Results <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+logistic_result <- logistic_analysis(logistic_Results,covariates)%>%
+                    rownames_to_column(var = "Variable")
+
+#4. univariate Cox PH regression_categorical covariate
+covariates_G <- colnames(df.ER.IDQ)[c(24:39)]
+
+univ_formulas_G <- sapply(covariates_G, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+univ_models_G <- lapply(univ_formulas_G, function(x) { coxph(x, data = df.ER.IDQ) })
+univ_cat_result <- univ_cat( univ_models_G)%>%
+   as.data.frame() %>%
+  rownames_to_column(var = "Variable")
+
+
+wb <- createWorkbook()
+addWorksheet(wb, "Logistic Result")
+addWorksheet(wb, "CoxPH Conc Result")
+addWorksheet(wb, "CoxPH cate Result")
+addWorksheet(wb, "wilcox result")
+
+writeData(wb, sheet = "Logistic Result", x = logistic_result)
+writeData(wb, sheet = "CoxPH Conc Result", x = univ_con_result)
+writeData(wb, sheet = "CoxPH cate Result", x = univ_cat_result)
+writeData(wb, sheet = "wilcox result", x = wilcox_result)
+
+# abstract the results
+if (DI == 1) {
+variables_to_abstract <- colnames(df.ER.IDQ)[c(5,10:13,16,21)]
+   } else if(DI == 14) {
+variables_to_abstract <- colnames(df.ER.IDQ)[c(5,14,15,17,22)]     
+   } else if(DI == 14) {
+variables_to_abstract <- colnames(df.ER.IDQ)[c(5,18,19,20,23)]     
+   }   
+
+logistic_result_abstract <- logistic_result %>% filter (Variable%in% variables_to_abstract)
+CoxPH_conc_abstract <- univ_con_result %>% filter (Variable%in% variables_to_abstract)%>% select(Variable,beta,P.Value)
+
+wb_abstract <- createWorkbook()
+addWorksheet(wb_abstract, "Logistic Result Abstract")
+addWorksheet(wb_abstract, "CoxPH Conc Abstract")
+writeData(wb_abstract, sheet = "Logistic Result Abstract", x = logistic_result_abstract)
+writeData(wb_abstract, sheet = "CoxPH Conc Abstract", x = CoxPH_conc_abstract)
+
+setwd( "C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10") 
+saveWorkbook(wb, file = "Conventional ER methods result.xlsx", overwrite = TRUE)
+saveWorkbook(wb_abstract, file = "CoxPH&logistic abstract result.xlsx", overwrite = TRUE)
+```
+
+#6 Replicate simulation by 1000 times
+
+##6.1 common functions
+
+```{r}
+#1. loop function
+
+loop <- function(DI, Case.fix, seed, parameter.451, event.shape, event.scale){
+
+      # Bootstrap individual parameters
+       seed1 <- seed+6
+       set.seed(seed1)
+       ID.unique <- unique(parameter.451$SUBJID) 
+       ID.bootstrap <- sample(ID.unique, 1000, replace = TRUE)
+
+       iparameter <- data.frame()
+
+       for (i in 1:length(ID.bootstrap)) {
+         id <- ID.bootstrap[i]
+         rows_for_id <- parameter.451[parameter.451$SUBJID == id, ]
+         rows_for_id$NEWID <- i
+         iparameter<- bind_rows(iparameter, rows_for_id)
+       }
+
+       iparameter <- iparameter %>%
+                      rename(ID=NEWID)
+
+
+       if (Case.fix == 1) {
+           iparameter.allID <- iparameter%>%
+                            mutate(KA=KA*20,
+                            CL=CL*18)  
+
+       } else if (Case.fix == 2) {
+           iparameter.allID <- iparameter%>%
+                            mutate(KA=KA*20,
+                            CL=CL*5)   
+       } else if (Case.fix == 3) {
+           iparameter.allID <- iparameter%>%
+                     mutate(KA=KA*3,
+                     CL=CL/120, 
+                     V2=V2/40,
+                     V3=V3/30,
+                     Q=Q/50)  
+       }
+    
+      
+     # run the simulation to get PK profiles
+       iparameter.allID.1 <- iparameter.allID %>% filter(ID <501)
+       iparameter.allID.2 <- iparameter.allID %>% filter(ID >500)
+
+       evnt_1 <- ev(amt=UDOSE,ii= DI*24,addl=599, ID=1:500)
+
+       out_1 <- mod%>%
+              idata_set(iparameter.allID.1) %>%
+              ev(evnt_1)%>%
+              mrgsim(recover = c("CL","HD","CREAT","SUBJID"), 
+                     carry.out = "EVID", 
+                     recsort = 3,
+                     atol = 1e-12, 
+                     rtol = 1e-10,
+                     tgrid = seq(0, 14400, by = 1))
+
+       evnt_2 <- ev(amt=LDOSE,ii= DI*24,addl=599, ID=501:1000)
+
+       out_2 <- mod%>%
+              idata_set(iparameter.allID.2) %>%
+              ev(evnt_2)%>%
+              mrgsim(recover = c("CL","HD","CREAT","SUBJID"), 
+                     carry.out = "EVID", 
+                     recsort = 3,
+                     atol = 1e-12, 
+                     rtol = 1e-10,
+                     tgrid = seq(0, 14400, by = 1))
+       exp_1 <- out_1 %>% 
+         as_tibble() %>% 
+         distinct() %>%
+         group_by(time) %>%
+         filter(EVID != 1) %>%
+         ungroup()%>%
+         mutate(DAY = ceiling(time/24),
+                CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+                AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+         filter(time > 0)%>%
+         mutate(Cavg = AUC/time)%>%  # average concentration time to event
+         group_by(ID, DAY) %>%
+         mutate(Cmax = max(CP),
+                Ctrough = tail(CP,1)) %>%
+         ungroup()%>%
+                   mutate(DOSE = UDOSE)
+
+       exp_2 <- out_2 %>% 
+         as_tibble() %>% 
+         distinct() %>%
+         group_by(time) %>%
+         filter(EVID != 1) %>%
+         ungroup()%>%
+         mutate(DAY = ceiling(time/24),
+                CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+                AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+         filter(time > 0)%>%
+         mutate(Cavg = AUC/time)%>%  # average concentration time to event
+         group_by(ID, DAY) %>%
+         mutate(Cmax = max(CP),
+                Ctrough = tail(CP,1)) %>%
+         ungroup()%>%
+                   mutate(DOSE = LDOSE)
+
+       exp.0 <- rbind(exp_1,exp_2)
+
+
+       exp.1 <-  exp.0 %>% 
+          select(-EVID,-GUT,-CENT,-PERIPH)%>%
+          rename(AUCTE=AUC,
+                 CavgTE= Cavg)%>%
+          filter(time %% 24 == 0)%>%
+          select(ID,SUBJID,DAY,time,DOSE,CL,CP,Cmax,Ctrough,AUCTE,CavgTE)%>%
+        #  filter(time %% 24 == 0)%>%
+          mutate(DOSE = if_else(is.na(DOSE), 0, DOSE))
+
+        # get the daily AUC
+         AUC1D <- exp.1 %>%
+                 arrange(ID, DAY) %>%
+                 group_by(ID) %>%
+         # Calculate the last AUCTE for each day for each ID
+                 group_by(DAY, .add = TRUE) %>%
+                 summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+        # Calculate daily AUC for each ID
+                 group_by(ID) %>%
+                 mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+                 ungroup()%>%
+                 select(-LastAUCTE)%>%
+                 mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+       Combined.data <- left_join(exp.1, AUC1D, by = c("ID", "DAY"))
+
+      # calculate all possible necessary exposure matrix
+       exp.2 <- Combined.data%>%
+               group_by(ID) %>%
+               mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+                      AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+                      AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+                      AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+                      Cavg = AUC1D / 24,
+                      Cavg1W = AUC1W / (24*7),
+                      Cavg2W = AUC2W / (24*14),
+                      Cavg3W = AUC3W / (24*21),
+                      Cavg4W = AUC4W / (24*28)) %>%
+               ungroup()%>%
+               mutate(AUC1W = ifelse(is.na(AUC1W), AUCTE, AUC1W),
+                      AUC2W = ifelse(is.na(AUC2W), AUCTE, AUC2W),
+                      AUC3W = ifelse(is.na(AUC3W), AUCTE, AUC3W),
+                      AUC4W = ifelse(is.na(AUC4W), AUCTE, AUC4W),
+                      Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+                      Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+                      Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+                      Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))
+
+      # only maintain the exposure matrix used for ER analysis
+       df.exp <- exp.2 %>%
+                  select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W,-Cavg3W)%>%
+                group_by(ID) %>%
+                mutate(
+                      Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                      Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                      Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28]),
+                      CavgTE2WC1 = if_else(DAY > 14, CavgTE, Cavg2W[DAY == 14]),
+                      CavgTE4WC1 = if_else(DAY > 28, CavgTE, Cavg4W[DAY == 28]),
+                      CavgSS = max(tail(Cavg, n = min(100, length(Cavg)))),
+                      Cavg1WSS = max(tail(Cavg1W, n = min(100, length(Cavg1W)))),
+                      Cavg2WSS = max(tail(Cavg2W, n = min(100, length(Cavg2W)))),
+                      Cavg4WSS = max(tail(Cavg4W, n = min(100, length(Cavg4W)))),
+                      CavgTESS = max(tail(CavgTE, n = min(100, length(CavgTE))))
+                      ) %>%
+                ungroup()
+    ## Generate TTE dataset
+   
+      set.seed(seed)
+       n.event = 750
+       n.censor= 250
+       Sample.event <- tibble(ID = 1:n.event) %>% 
+                       mutate(time = 1 + ceiling(rweibull(n.event, shape = event.shape, scale = event.scale )),
+                             event=1) 
+
+      set.seed(seed+6)
+      censor.time <- sample(1:600, n.censor, replace = TRUE)
+
+      Sample.censor <- tibble(ID = 1:n.censor) %>% 
+                       mutate(time = censor.time,
+                       event=0) 
+
+      merge.data <- rbind(Sample.event, Sample.censor)
+      set.seed(seed+6)
+      TTE <- merge.data %>% 
+             mutate(event = if_else(time > 600, 0, event),
+                    ID = sample(1:1000, n(), replace = FALSE))%>% 
+            arrange(ID)
+      # merge the TTE dataset with df.ER dataset
+      df.ER <- data.frame()
+
+      for (i in 1:1000) {
+        single <- TTE$time[i]
+        rows_for_id <- df.exp[df.exp$ID == i, ]
+        max_day <- max(rows_for_id$DAY, na.rm = TRUE)
+  
+        if (max_day < single) {
+          rows_for_id$EVENT <- 0
+          max_row <- which.max(rows_for_id$DAY)
+          rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+        } else {
+    #Cut off the extra data that Day > single
+          rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+          max_row <- which.max(rows_for_id$DAY)
+    #match the Event when TTE has censored values
+          rows_for_id$EVENT <- ifelse(1:nrow(rows_for_id) == max_row, TTE$event[TTE$ID == i], 0)
+          rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+        }
+         df.ER <- bind_rows(df.ER, rows_for_id)
+      }
+
+
+      analysis <- df.ER %>% filter(LAST == 1)
+
+        # ================only Using first day data points =====================
+        ## Group the IDs based on the quantiled exposure at the first day(df.ER.IDQ)
+  
+      df.ER.ID <- df.ER %>%
+            filter(DAY == 1) %>%
+            select(SUBJID, ID, DOSE, CL, Ctrough, Cavg, Cavg2WC1,Cavg4WC1 )%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+      # last day CavgTE and EVENT & DAY
+      G.ID <-  analysis[,c("ID","DAY", "Ctrough","Cavg","CavgSS","Cavg1W","Cavg2W","Cavg2WC1","Cavg4WC1","CavgTE", 
+                           "CavgTE2WC1","CavgTE4WC1","Cavg2WSS","Cavg4WSS","EVENT","LAST")]%>%
+                rename(CtroughOED=Ctrough,
+                      CavgOED=Cavg,
+                      Cavg1WOED=Cavg1W,
+                      Cavg2WOED=Cavg2W,
+                      Cavg2WC1OED=Cavg2WC1,
+                      Cavg4WC1OED=Cavg4WC1)
+
+      df.ER.IDQ <- merge(df.ER.ID, G.ID, by = "ID")%>%
+                   select(ID, SUBJID, DAY, DOSE, CL, LAST,EVENT, 
+                          Ctrough1D, CtroughOED, Cavg1D,CavgSS,CavgOED,Cavg1WOED,
+                          Cavg2WC1,Cavg2WSS,Cavg2WOED,Cavg2WC1OED,
+                          Cavg4WC1,Cavg4WSS,Cavg4WC1OED,
+                          CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+      #1. KM plots based on grouped ID
+
+        df.ER.IDQ$Ctrough1D_IDQ  <- quantiles(df.ER.IDQ, "Ctrough1D")
+        df.ER.IDQ$CtroughOED_IDQ  <- quantiles(df.ER.IDQ, "CtroughOED")
+
+        df.ER.IDQ$Cavg1D_IDQ  <- quantiles(df.ER.IDQ, "Cavg1D")
+        df.ER.IDQ$Cavg2WC1_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WC1")
+        df.ER.IDQ$Cavg4WC1_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WC1")
+      
+        df.ER.IDQ$CavgSS_IDQ  <- quantiles(df.ER.IDQ, "CavgSS")
+        df.ER.IDQ$Cavg2WSS_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WSS")
+        df.ER.IDQ$Cavg4WSS_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WSS")
+
+        df.ER.IDQ$CavgOED_IDQ  <- quantiles(df.ER.IDQ, "CavgOED")
+        df.ER.IDQ$Cavg1WOED_IDQ  <- quantiles(df.ER.IDQ, "Cavg1WOED")
+        df.ER.IDQ$Cavg2WOED_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WOED")
+        df.ER.IDQ$Cavg2WC1OED_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WC1OED")
+        df.ER.IDQ$Cavg4WC1OED_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WC1OED")
+
+        df.ER.IDQ$CavgTE_IDQ  <- quantiles(df.ER.IDQ, "CavgTE")
+        df.ER.IDQ$CavgTE2WC1_IDQ  <- quantiles(df.ER.IDQ, "CavgTE2WC1")
+        df.ER.IDQ$CavgTE4WC1_IDQ  <- quantiles(df.ER.IDQ, "CavgTE4WC1")
+
+        #Compare the exposure matrix with or without event
+        # get the mean values for the exposures
+        ID.e <- df.ER.IDQ %>% filter(EVENT==1)
+        ID.n <- df.ER.IDQ %>% filter(EVENT==0)
+
+        covariates <- colnames(df.ER.IDQ)[c(5,8:23)]
+        wilcox_result <- wilcox(ID.e, ID.n, covariates)
+        #2. univariate Cox PH regression_continuous covariate
+
+        univ_formulas <- sapply(covariates, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+        univ_models <- lapply(univ_formulas, function(x) { coxph(x, data = df.ER.IDQ) })
+        univ_con_result <- univ_con(univ_models)
+
+
+        #3. logistic regression analysis
+
+        logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+        logistic_Results <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+        logistic_result <- logistic_analysis(logistic_Results,covariates)
+        #4. univariate Cox PH regression_categorical covariate
+        covariates_G <- colnames(df.ER.IDQ)[c(24:39)]
+
+        univ_formulas_G <- sapply(covariates_G, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+        univ_models_G <- lapply(univ_formulas_G, function(x) { coxph(x, data = df.ER.IDQ) })
+        univ_cat_result <- univ_cat( univ_models_G)
+
+       return(list(result_1 = univ_con_result, result_2 = logistic_result,result_3 =  univ_cat_result,wilcox_results = wilcox_result ))
+} 
+
+#2. abstract P.Value values from the list
+extract_pvalue <- function(list_data, target_row_name) {
+    # Initialize an empty dataframe to store results
+    results <- data.frame(row_name = character(), P.Value = numeric(), Seed = character(), stringsAsFactors = FALSE)
+    
+    # Iterate over each list element using its name
+    list_names <- names(list_data)
+    for (seed in list_names) {
+        # Check if 'target_row_name' is a row name in the data frame
+        if(target_row_name %in% rownames(list_data[[seed]])) {
+            # Extract the P.Value for the given row name
+            p_value <- as.numeric(list_data[[seed]][target_row_name, "P.Value", drop = TRUE])
+            
+            # Combine the extracted P.Value with the current seed name into results
+            temp_result <- data.frame(row_name = target_row_name, P.Value = p_value, Seed = seed, stringsAsFactors = FALSE)
+            results <- rbind(results, temp_result)
+        }
+    }
+    return(results)
+}
+
+###3. common function to abstract P.Values from the list & split the p-values into two groups 
+# - P.Value >= 0.05, group1=0; P.Value < 0.05, group1 =1
+# - P.Value >= 0.01, group2=0; P.Value < 0.01, group2 =1
+
+process_dataset <- function(data, variables, type) {
+ 
+  results_list <- list()
+  for (variable in variables) {
+    extracted <- extract_pvalue(data, variable)
+    
+    # Assign group based on p-value
+    extracted$Group1 <- ifelse(extracted$P.Value >= 0.05, "p>=0.05", "p<0.05")
+    extracted$Group2 <- ifelse(extracted$P.Value >= 0.01, "p>=0.01", "p<0.01")
+    
+    # Generate summary table for both groups
+    group1_table <- table(extracted$Group1)
+    group2_table <- table(extracted$Group2)
+    
+    # Add tables to the results list
+    results_list[[paste0(type, "_", variable, "_Group1")]] <- group1_table
+    results_list[[paste0(type, "_", variable, "_Group2")]] <- group2_table
+  }
+  return(results_list)
+}
+
+#4. abstract slope values from logistic regression results
+extract_slope <- function(list_data, Slope, variables) {
+  # Initialize an empty list to store the results for each variable
+  results_list <- list()
+  
+  # Iterate over each variable in the provided variables
+  for (variable in variables) {
+    # Initialize an empty dataframe to store results for the current variable
+    results <- data.frame(row_name = character(), Slope.Value = numeric(), Seed = character(), stringsAsFactors = FALSE)
+    
+    # Iterate over each list element using its name (seed)
+    for (seed in names(list_data)) {
+      # Check if the 'variable' is a row name in the data frame of the current seed
+      if (variable %in% rownames(list_data[[seed]])) {
+        # Extract the Slope value for the given variable
+        Slope_value <- as.numeric(list_data[[seed]][variable, Slope, drop = TRUE])
+        
+        # Combine the extracted Slope value with the current seed name into results
+        temp_result <- data.frame(row_name = variable, Slope.Value = Slope_value, Seed = seed, stringsAsFactors = FALSE)
+        results <- rbind(results, temp_result)
+      }
+    }
+    
+    # Store the results for the current variable in the results list
+    results_list[[variable]] <- results
+  }
+  
+  return(results_list)
+}
+
+#5. summrize slope values from logistic regression
+summarize_slopes <- function(slope_results) {
+  # Initialize an empty data frame to store the summary results
+  summary_results <- data.frame(
+    row_name = character(),
+    Logit.Min = numeric(),
+    Logit.Max = numeric(),
+    Logit.Mean = numeric(),
+    Logit.Median = numeric(),
+    Logit.q0.025 = numeric(),
+    Logit.q0.975 = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Iterate over each con_var in the slope_results
+  for (variable in names(slope_results)) {
+    # Extract the data frame for the current variable
+    variable_data <- slope_results[[variable]]
+    
+    # Group by row_name and compute summary statistics
+    grouped_summary <- variable_data %>%
+      dplyr::group_by(row_name) %>%
+      dplyr::summarize(
+        Logit.Min = min(Slope.Value, na.rm = TRUE),
+        Logit.Max = max(Slope.Value, na.rm = TRUE),
+        Logit.Mean = mean(Slope.Value, na.rm = TRUE),
+        Logit.Median = median(Slope.Value, na.rm = TRUE),
+        Logit.q0.025 = quantile(Slope.Value, 0.025, na.rm = TRUE),
+        Logit.q0.975 = quantile(Slope.Value, 0.975, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # Add the summaries for the current variable to the result data frame
+    summary_results <- rbind(summary_results, grouped_summary)
+  }
+  
+  return(summary_results)
+}
+#6. extracting beta values for continuous covariates
+
+extract_beta_cont <- function(list_data, target_row_names, group_count) {
+    # Initialize an empty dataframe to store results
+    results <- data.frame(row_name = character(), Beta = numeric(), Seed = character(), stringsAsFactors = FALSE)
+    
+    # Iterate over each list element using its name
+    list_names <- names(list_data)
+    for (seed in list_names) {
+        for (target_row_name in target_row_names) {
+            # Check if 'target_row_name' is a row name in the data frame
+            if(target_row_name %in% rownames(list_data[[seed]])) {
+                # Extract the beta Value for the given row name
+                beta <- as.numeric(list_data[[seed]][target_row_name, "beta", drop = TRUE])
+                
+                # Combine the extracted Beta Value with the current seed name into results
+                temp_result <- data.frame(row_name = target_row_name, Beta = beta, Seed = seed, stringsAsFactors = FALSE)
+                results <- rbind(results, temp_result)
+            }
+        }
+    }
+    return(results)
+}
+
+#7. extracting beta values for categorical covariates
+extract_beta_Cate <- function(list_data, target_row_names, group_count) {
+ 
+  if(!(group_count %in% c(3, 4))) {
+    stop("group_count must be either 3 or 4")
+  }
+  
+  initial_columns <- c("row_name", "Seed")
+  
+  # Dynamically adjust the beta columns based on group_count
+  beta_columns <- if(group_count == 4) {
+    c("Beta1", "Beta2", "Beta3")
+  } else {
+    c("Beta1", "Beta2")
+  }
+  
+  # Combine initial columns with beta columns for the complete dataframe structure
+  results_columns <- c(initial_columns, beta_columns)
+  results <- setNames(data.frame(matrix(ncol = length(results_columns), nrow = 0)), results_columns)
+  
+  # Iterate over each list element using its name
+  list_names <- names(list_data)
+  for (seed in list_names) {
+    for (target_row_name in target_row_names) {
+      # Check if 'target_row_name' is a row name in the data frame
+      if(target_row_name %in% rownames(list_data[[seed]])) {
+        # Initialize a vector for the beta values
+        beta_values <- numeric(length(beta_columns))
+        
+        # Extract the Beta Values for the given row name based on group_count
+        for (i in 1:length(beta_columns)) {
+          beta_value <- as.numeric(list_data[[seed]][target_row_name, beta_columns[i], drop = TRUE])
+          beta_values[i] <- beta_value
+        }
+        
+        # Combine the extracted Beta Values with the current seed name into results
+        temp_result <- c(target_row_name, seed, beta_values)
+        temp_df <- setNames(data.frame(as.list(temp_result), stringsAsFactors = FALSE), results_columns)
+        results <- rbind(results, temp_df)
+      }
+    }
+  }
+  return(results)
+}
+
+#8 common function for summarzing beta values for categorical covariates
+
+summarize_beta_cate <- function(Beta.cate, group_count) {
+  # Ensure Beta.cate has the expected beta columns for the specified group_count
+  expected_beta_cols <- paste0("Beta", 1:(group_count - 1))
+  Beta.cate <- Beta.cate %>% select(row_name, Seed, all_of(expected_beta_cols))
+
+  # Convert Beta columns to long format
+  Beta.cate_long <- Beta.cate %>%
+    pivot_longer(cols = starts_with("Beta"), names_to = "Beta_variable", values_to = "Beta_value") %>%
+    mutate(Beta_value = as.numeric(Beta_value), # Ensure Beta_value is numeric
+           Beta_variable = factor(Beta_variable, levels = expected_beta_cols))
+  
+  # Summarize Beta_value by Beta_variable and row_name
+  Beta.cate_summary <- Beta.cate_long %>%
+    group_by(row_name, Beta_variable) %>%
+    summarise(
+      Cox.Min = min(Beta_value, na.rm = TRUE),
+      Cox.Max = max(Beta_value, na.rm = TRUE),
+      Cox.Mean = mean(Beta_value, na.rm = TRUE),
+      Cox.Median = median(Beta_value, na.rm = TRUE),
+      Cox.q0.025 = quantile(Beta_value, 0.025, na.rm = TRUE),
+      Cox.q0.975 = quantile(Beta_value, 0.975, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  return(Beta.cate_summary)
+}
+
+#9. sumarize odd ratios
+logit_odd <- function(logit_results) {
+  # Initialize an empty data frame to store the summary results
+  summary_results <- data.frame(
+    row_name = character(),
+    Logit.Min = numeric(),
+    Logit.Max = numeric(),
+    Logit.Mean = numeric(),
+    Logit.Median = numeric(),
+    Logit.q0.025 = numeric(),
+    Logit.q0.975 = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (variable in names(logit_results)) {
+    # Extract the data frame for the current variable
+    variable_data <- logit_results[[variable]]
+    
+    # Group by row_name and compute summary statistics
+    grouped_summary <- variable_data %>%
+      dplyr::group_by(row_name) %>%
+      dplyr::summarize(
+        Logit.Min = min(Odd.ratio, na.rm = TRUE),
+        Logit.Max = max(Odd.ratio, na.rm = TRUE),
+        Logit.Mean = mean(Odd.ratio, na.rm = TRUE),
+        Logit.Median = median(Odd.ratio, na.rm = TRUE),
+        Logit.q0.025 = quantile(Odd.ratio, 0.025, na.rm = TRUE),
+        Logit.q0.975 = quantile(Odd.ratio, 0.975, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # Add the summaries for the current variable to the result data frame
+    summary_results <- rbind(summary_results, grouped_summary)
+  }
+  
+  return(summary_results)
+}
+```
+
+##6.2 Using random seed to perform the ER analysis
+
+### input the initial dose and parameter dataset
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis")
+# mrgsolve model
+mod<- mread_cache("KP_2com.mod") 
+# Clear the input dose dataset
+parameter.451 <- read.csv("estimated individual PK parameters.csv")
+```
+There scenarios will be explored:
+- EO1: shape = 0.65, scale = 100;
+- EO2: shape = 2, scale = 240;
+###run simulations
+```{r}
+# dose interval could be changed 
+DI = 14 # DAY
+Case.fix <- 3
+event.shape <-2
+event.scale <- 240
+
+LDOSE <- 10
+UDOSE <- 60
+# Initialize lists to store the results from each simulation
+univ_con_IDQ <- list()
+univ_cat_IDQ <- list()
+logistic_test <- list()
+wilcox_test <- list()
+# Set a fixed seed for reproducibility
+set.seed(2024)
+# Randomly select 100 seeds from 1 to 100,000
+seeds <- sample(10:10000, 1000)
+
+
+for (seed in seeds) {
+  simulation_result <- loop(DI, Case.fix, seed, parameter.451, event.shape, event.scale) 
+  univ_con_IDQ[[as.character(seed)]] <- simulation_result$result_1
+  logistic_test[[as.character(seed)]] <- simulation_result$result_2
+  univ_cat_IDQ[[as.character(seed)]] <- simulation_result$result_3
+  wilcox_test[[as.character(seed)]] <- simulation_result$wilcox_results
+}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10")
+saveRDS(univ_con_IDQ, "univ_con_IDQ.rds")
+saveRDS(univ_cat_IDQ, "univ_cat_IDQ.rds")
+saveRDS(wilcox_test, "wilcox_test.rds")
+saveRDS(logistic_test, "logistic_test.rds")
+
+```
+
+# Read saved files if need to get more information
+```{r}
+univ_con_IDQ <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/univ_con_IDQ.rds")
+univ_cat_IDQ <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/univ_cat_IDQ.rds")
+wilcox_test <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/wilcox_test.rds")
+logistic_test <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10/logistic_test.rds")
+DI = 14
+```
+##6.3 Abstract P-values
+
+```{r}
+# Specify variables for each type of analysis
+if (DI == 14) {
+
+con_var <- c("Cavg2WC1","Cavg2WSS", "Cavg2WC1OED","CavgTE2WC1")
+cat_var <-  c("Cavg2WC1_IDQ","Cavg2WSS_IDQ","Cavg2WC1OED_IDQ","CavgTE2WC1_IDQ")
+Wilcox_var <- c("Cavg2WC1","Cavg2WSS","Cavg2WC1OED","CavgTE2WC1")
+
+} else if(DI == 28) {
+  
+con_var <- c("Cavg4WC1","Cavg4WSS", "Cavg4WC1OED","CavgTE4WC1")
+cat_var <-  c("Cavg4WC1_IDQ","Cavg4WSS_IDQ","Cavg4WC1OED_IDQ","CavgTE4WC1_IDQ")
+Wilcox_var <- c("Cavg4WC1","Cavg4WSS","Cavg4WC1OED","CavgTE4WC1")
+
+
+} else if(DI == 1) {
+
+    con_var <- c("Cavg1D","CavgSS", "CavgOED","Cavg1WOED","Cavg2WOED","CavgTE")
+    cat_var <-  c("Cavg1D_IDQ","CavgSS_IDQ","CavgOED_IDQ","Cavg1WOED_IDQ","Cavg2WOED_IDQ","CavgTE_IDQ")
+    Wilcox_var <- c("Cavg1D","CavgSS", "CavgOED","Cavg1WOED","Cavg2WOED","CavgTE")
+
+}
+
+cat_IDQ <- process_dataset(univ_cat_IDQ, cat_var, "cat")
+con_IDQ <- process_dataset(univ_con_IDQ, con_var, "con")
+Wilcox <- process_dataset(wilcox_test, Wilcox_var, "WTest")
+logist <- process_dataset(logistic_test, con_var, "Logist")
+
+tables_list <- c(con_IDQ,logist)
+
+final_table <- bind_rows(tables_list, .id = "Source")
+
+table_0_05 <- final_table %>%
+  filter(grepl("Group1", Source)) %>%
+ # select(-c(`p>=0.01`, `p<0.01`)) %>%
+  mutate_all(~replace(., is.na(.), 0))
+
+```
+##6.4  abstract and summary slope values for logistic regression
+```{r}
+slope_results <- extract_slope(logistic_test, Slope = "Slope", variables = con_var)
+summary_results <- summarize_slopes(slope_results)
+
+logit_results <- lapply(slope_results, function(df) {
+  df$Odd.ratio <- exp(df$Slope.Value) # Add the new column
+  return(df) # Return the updated data frame
+})
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10")
+saveRDS(logit_results, "logit results.rds")
+```
+
+##6.5  summary slope & beta & odd ratios
+```{r}
+Beta.cont <- extract_beta_cont(univ_con_IDQ, con_var)
+coxPH_odd <- Beta.cont %>% mutate(hazard.ratio = exp(Beta))
+
+group_count <- 4  # Adjust based on the actual group_count
+
+Beta.cate <- extract_beta_Cate(univ_cat_IDQ, cat_var,group_count) 
+
+Beta.cont_df <- Beta.cont %>%
+  group_by(row_name) %>%
+  summarise(
+    Cox.Min = min(Beta),
+    Cox.Max = max(Beta),
+    Cox.Mean = mean(Beta),
+    Cox.Median = median(Beta),
+    Cox.q0.025 = quantile(Beta, 0.025), 
+    Cox.q0.975 = quantile(Beta, 0.975)  
+    )%>%
+   mutate(Beta_variable = "Beta")
+
+Beta.cate_df <- summarize_beta_cate(Beta.cate, group_count)
+
+Beta.summary <- bind_rows(Beta.cont_df, Beta.cate_df)
+
+
+variable.count<- length(con_var)
+Beta.filtered <- Beta.summary[1:variable.count, ]
+
+p.filtered_con <- table_0_05[1:variable.count, ]
+p.filtered_logit <- table_0_05[(variable.count+1):(2*variable.count), ]
+
+p_values_con <- p.filtered_con %>%
+  select(Source, `p<0.05`) %>%
+  mutate(Source = str_replace(Source, "^con_", "")) %>%
+  mutate(Source = str_replace(Source, "_Group1$", ""))%>%
+  rename(row_name=Source)%>%
+  rename(`Cox(P<0.05)` = `p<0.05`)
+
+p_values_logit <- p.filtered_logit %>%
+  select(Source, `p<0.05`) %>%
+  mutate(Source = str_replace(Source, "^Logist_", "")) %>%
+  mutate(Source = str_replace(Source, "_Group1$", ""))%>%
+  rename(row_name=Source)%>%
+  rename(`Logit(P<0.05)` = `p<0.05`)
+
+loop.summary.logit <-  left_join(p_values_logit, summary_results, by = "row_name")
+loop.summary.cox <-  left_join(p_values_con, Beta.filtered, by = "row_name")
+
+loop.summary.logit<- loop.summary.logit %>% rename(Covariate = row_name)
+loop.summary.cox<- loop.summary.cox %>% rename(Covariate = row_name) %>%select(-Beta_variable)
+
+wb_summary <- createWorkbook()
+addWorksheet(wb_summary, "Logistic Analysis")
+addWorksheet(wb_summary, "Univariate CoxPH Analysis")
+writeData(wb_summary, sheet = "Logistic Analysis", x = loop.summary.logit)
+writeData(wb_summary, sheet = "Univariate CoxPH Analysis", x = loop.summary.cox)
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10")
+saveWorkbook(wb_summary, file = "Loop Results_Slope&Beta.xlsx", overwrite = TRUE)
+saveRDS(coxPH_odd, "CoxPH results.rds")
+
+logit_odd_results <- logit_odd(logit_results)
+
+Cox_odd_results <- coxPH_odd %>%
+  group_by(row_name) %>%
+  summarise(
+    Cox.Min = min(hazard.ratio),
+    Cox.Max = max(hazard.ratio),
+    Cox.Mean = mean(hazard.ratio),
+    Cox.Median = median(hazard.ratio),
+    Cox.q0.025 = quantile(hazard.ratio, 0.025), 
+    Cox.q0.975 = quantile(hazard.ratio, 0.975)  
+    )
+
+loop.summary.logit <-  left_join(p_values_logit, logit_odd_results, by = "row_name")
+loop.summary.cox <-  left_join(p_values_con, Cox_odd_results, by = "row_name")
+
+wb_summary <- createWorkbook()
+addWorksheet(wb_summary, "Logistic Analysis")
+addWorksheet(wb_summary, "Univariate CoxPH Analysis")
+writeData(wb_summary, sheet = "Logistic Analysis", x = loop.summary.logit)
+writeData(wb_summary, sheet = "Univariate CoxPH Analysis", x = loop.summary.cox)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_2Dose/ER1_DH1_HL2W_EO1_ii2W_60&10")
+saveWorkbook(wb_summary, file = "Loop Results_odd&hazard_ratio.xlsx", overwrite = TRUE)
+```
+

@@ -1,0 +1,876 @@
+---
+title: "ER2_DH2_LDR"
+author: "Xuefen Yin"
+date: "2024-08-23"
+output: pdf_document
+---
+# R setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+rm(list=ls(all=TRUE))
+
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(gtable)
+
+custom_log_labels <- function(x) {
+  ifelse(x < 10, 
+         sprintf("%.1f", x),  # One decimal place for numbers < 10
+         sprintf("%.0f", x))  # No decimal places for numbers >= 10
+}
+
+custom_theme <- theme_classic() +
+  theme(
+    panel.grid.major = element_line(color = "gray70", linewidth = 0.5),  # Major grid lines
+    panel.grid.minor = element_line(color = "gray90", linewidth = 0.25)  # Minor grid lines
+  )
+
+```
+# Calculate True ER relationship
+
+Note: 
+- the exposure metrics:Dose, Ctrough1D, Cavg1D, CtroughOED, CavgOED, Cavg1WOED, Cavg2WOED and CavgTE
+- y-axis: abstract the event% for DH2 with single starting dose
+- x-axis: Median exposure values from all IDs with a single starting dose in DH2.
+
+## ORR
+```{r}
+
+logistic_regression_comparison <- function(TRUE_DH1, TRUE_DH2, x_var, y_var) {
+  # Ensure x variable is numeric for log scale
+ 
+  ggplot() +
+  
+      # Original True ER line for DH2
+    geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+    geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+    geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"), 
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+    
+    # Original True ER line for DH1
+    geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+    geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH1"), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.8),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of ORR Event",
+      title = paste("Logistic Regression -", x_var),
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    scale_x_log10(labels = custom_log_labels) +
+     scale_color_manual(values = c("True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+}
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+ORR_conc_500 <- read.csv("ORR_df_ER_IDQ_500&200&100.csv")
+ORR_conc_200 <- read.csv("ORR_df_ER_IDQ_200&100&60.csv")
+ORR_conc_100 <- read.csv("ORR_df_ER_IDQ_100&60&40.csv")
+ORR_conc_60 <- read.csv("ORR_df_ER_IDQ_60&40&20.csv")
+ORR_conc_40 <- read.csv("ORR_df_ER_IDQ_40&20&10.csv")
+ORR_conc_20 <- read.csv("ORR_df_ER_IDQ_20&10&5.csv")
+
+#abstract the highest dose level
+
+predictors <- c("avgDoseTE", "Ctrough1D", "Cavg1D", "CtroughOED", "CavgOED", "Cavg1WOED", "Cavg2WOED", "CavgTE")
+
+ORR_median_500<- sapply(ORR_conc_500[predictors], median, na.rm = TRUE)
+ORR_Event_500 <- mean(ORR_conc_500$EVENT)
+
+ORR_median_200<- sapply(ORR_conc_200[predictors], median, na.rm = TRUE)
+ORR_Event_200 <- mean(ORR_conc_200$EVENT)
+
+ORR_median_100<- sapply(ORR_conc_100[predictors], median, na.rm = TRUE)
+ORR_Event_100 <- mean(ORR_conc_100$EVENT)
+
+ORR_median_60<- sapply(ORR_conc_60[predictors], median, na.rm = TRUE)
+ORR_Event_60 <- mean(ORR_conc_60$EVENT)
+
+ORR_median_40<- sapply(ORR_conc_40[predictors], median, na.rm = TRUE)
+ORR_Event_40 <- mean(ORR_conc_40$EVENT)
+
+ORR_median_20<- sapply(ORR_conc_20[predictors], median, na.rm = TRUE)
+ORR_Event_20 <- mean(ORR_conc_20$EVENT)
+
+ORR_list <- list(
+  ORR_20 = c(ORR_median_20, EVENT = ORR_Event_20),
+  ORR_40 = c(ORR_median_40, EVENT = ORR_Event_40),
+  ORR_60 = c(ORR_median_60, EVENT = ORR_Event_60),
+  ORR_100 = c(ORR_median_100, EVENT = ORR_Event_100),
+  ORR_200 = c(ORR_median_200, EVENT = ORR_Event_200),
+  ORR_500 = c(ORR_median_500, EVENT = ORR_Event_500)
+)
+
+##Generate the true ER for dose DH2_Ctrough1D and Cavg1D are not correct
+ORR_trueER_DH2 <- as.data.frame(do.call(rbind, ORR_list))
+ORR_trueER_DH2$DOSE <- as.numeric(gsub("ORR_", "", rownames(ORR_trueER_DH2)))
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR")
+write.csv(ORR_trueER_DH2, "True ER_ORR_LDR_DH2.csv", row.names = FALSE)
+## compare the true ER for DH1 and DH2
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH1")
+True.ER <- read.csv("True ER_ORR.csv")
+True.ER$avgDoseTE <- True.ER$DOSE
+
+Logiplot1 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "avgDoseTE", "EVENT")
+Logiplot2 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "Ctrough1D", "EVENT")
+Logiplot3 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "Cavg1D", "EVENT")
+Logiplot4 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "CtroughOED", "EVENT")
+Logiplot5 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "CavgOED", "EVENT")
+Logiplot6 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "Cavg1WOED", "EVENT")
+Logiplot7 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "Cavg2WOED", "EVENT")
+Logiplot8 <- logistic_regression_comparison(True.ER, ORR_trueER_DH2, "CavgTE", "EVENT")
+
+Logistic_comparison <- grid.arrange(Logiplot1, Logiplot2, Logiplot3, Logiplot4,Logiplot5,Logiplot6,Logiplot7, Logiplot8,ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR/True ER comparions_DH1&2_ORR_LDR.tiff",
+      plot = Logistic_comparison, 
+     width = 20, height = 8, dpi = 400, units = "in")
+```
+## PFS
+```{r}
+logistic_regression_comparison <- function(TRUE_DH1, TRUE_DH2, x_var, y_var) {
+  # Ensure x variable is numeric for log scale
+ 
+  ggplot() +
+  
+      # Original True ER line for DH2
+    geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+    geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+    geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"), 
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+    
+    # Original True ER line for DH1
+    geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+    geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH1"), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.3),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of PFS Event",
+      title = paste("Logistic Regression -", x_var),
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    scale_x_log10(labels = custom_log_labels) +
+     scale_color_manual(values = c("True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+}
+
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+PFS_conc_500 <- read.csv("PFS_df_ER_IDQ_500&200&100.csv")
+PFS_conc_200 <- read.csv("PFS_df_ER_IDQ_200&100&60.csv")
+PFS_conc_100 <- read.csv("PFS_df_ER_IDQ_100&60&40.csv")
+PFS_conc_60 <- read.csv("PFS_df_ER_IDQ_60&40&20.csv")
+PFS_conc_40 <- read.csv("PFS_df_ER_IDQ_40&20&10.csv")
+PFS_conc_20 <- read.csv("PFS_df_ER_IDQ_20&10&5.csv")
+
+#abstract the highest dose level
+
+predictors <- c("DOSE","avgDoseTE", "Ctrough1D", "Cavg1D", "CtroughOED", "CavgOED", "Cavg1WOED", "Cavg2WOED", "CavgTE")
+
+PFS_median_500<- sapply(PFS_conc_500[predictors], median, na.rm = TRUE)
+PFS_Event_500 <- mean(PFS_conc_500$EVENT)
+
+PFS_median_200<- sapply(PFS_conc_200[predictors], median, na.rm = TRUE)
+PFS_Event_200 <- mean(PFS_conc_200$EVENT)
+
+PFS_median_100<- sapply(PFS_conc_100[predictors], median, na.rm = TRUE)
+PFS_Event_100 <- mean(PFS_conc_100$EVENT)
+
+PFS_median_60<- sapply(PFS_conc_60[predictors], median, na.rm = TRUE)
+PFS_Event_60 <- mean(PFS_conc_60$EVENT)
+
+PFS_median_40<- sapply(PFS_conc_40[predictors], median, na.rm = TRUE)
+PFS_Event_40 <- mean(PFS_conc_40$EVENT)
+
+PFS_median_20<- sapply(PFS_conc_20[predictors], median, na.rm = TRUE)
+PFS_Event_20 <- mean(PFS_conc_20$EVENT)
+
+PFS_list <- list(
+  PFS_20 = c(PFS_median_20, EVENT = PFS_Event_20),
+  PFS_40 = c(PFS_median_40, EVENT = PFS_Event_40),
+  PFS_60 = c(PFS_median_60, EVENT = PFS_Event_60),
+  PFS_100 = c(PFS_median_100, EVENT = PFS_Event_100),
+  PFS_200 = c(PFS_median_200, EVENT = PFS_Event_200),
+  PFS_500 = c(PFS_median_500, EVENT = PFS_Event_500)
+)
+
+##Generate the true ER for dose DH2
+PFS_trueER_DH2 <- as.data.frame(do.call(rbind, PFS_list))
+PFS_trueER_DH2$DOSE <- as.numeric(gsub("PFS_", "", rownames(PFS_trueER_DH2)))
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR")
+write.csv(PFS_trueER_DH2, "True ER_PFS_LDR_DH2.csv", row.names = FALSE)
+
+## compare the true ER for DH1 and DH2
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH1")
+PFS_True.ER <- read.csv("True ER_PFS.csv")
+PFS_True.ER$avgDoseTE <- PFS_True.ER$DOSE
+
+Logiplot1 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "avgDoseTE", "EVENT")
+Logiplot2 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "Ctrough1D", "EVENT")
+Logiplot3 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "Cavg1D", "EVENT")
+Logiplot4 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "CtroughOED", "EVENT")
+Logiplot5 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "CavgOED", "EVENT")
+Logiplot6 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "Cavg1WOED", "EVENT")
+Logiplot7 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "Cavg2WOED", "EVENT")
+Logiplot8 <- logistic_regression_comparison(PFS_True.ER, PFS_trueER_DH2, "CavgTE", "EVENT")
+
+Logistic_comparison <- grid.arrange(Logiplot1, Logiplot2, Logiplot3, Logiplot4,Logiplot5,Logiplot6,Logiplot7, Logiplot8,ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR/True ER comparions_DH1&2_PFS_LDR.tiff",
+      plot = Logistic_comparison, 
+     width = 20, height = 8, dpi = 400, units = "in")
+```
+
+# Dose history based on the df.exp
+```{r}
+create_dose_plot <- function(df_exp, dose_label) {
+  DosehistG <- df_exp %>%
+    select(ID, DOSE, DAY) %>%
+    count(DAY, DOSE, name = "freq") %>%
+    group_by(DAY) %>%
+    mutate(TOTAL = sum(freq)) %>%
+    ungroup() %>%
+    mutate(percentage = (freq / TOTAL) * 100) %>%
+    mutate(DOSE = as.factor(DOSE))
+  
+  ggplot() +
+    geom_line(data = DosehistG, aes(x = DAY, y = percentage, group = DOSE, color = DOSE), size = 1) +
+    scale_x_continuous(name = "Days since first dose") +
+    scale_y_continuous(name = "% of dose level") +
+    ggtitle("Dose modification summary plot") +
+    scale_color_discrete(name = "Dose", labels = dose_label) +
+    custom_theme +
+    theme(legend.title = element_blank(),
+          legend.text = element_text(size = 12),
+          plot.title = element_text(size = 14, hjust = 0.5, vjust = 0.5),
+          axis.text.x = element_text(size = 10),
+          axis.text.y = element_text(size = 10),
+          axis.title.x = element_text(hjust = 0.5, size = 12),
+          axis.title.y = element_text(hjust = 0.5, size = 12))
+}
+df.exp.20.L <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_20&10&5.rds")
+df.exp.40.L <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_40&20&10.rds")
+df.exp.60.L <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_60&40&20.rds")
+df.exp.100.L <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_100&60&40.rds")
+df.exp.200.L <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_200&100&60.rds")
+df.exp.500.L <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_500&200&100.rds")
+
+
+dose_label_20 <- c("0mg", "5mg","10mg","20mg")
+dose_label_40 <- c("0mg", "10mg","20mg","40mg")
+dose_label_60 <- c("0mg", "20mg","40mg","60mg")
+dose_label_100 <- c("0mg", "40mg","60mg","100mg")
+dose_label_200 <- c("0mg", "60mg","100mg","200mg")
+dose_label_500 <- c("0mg", "100mg","200mg","500mg")
+
+# Generate plots for each dataset
+plot_20 <- create_dose_plot(df.exp.20.L, dose_label_20)
+plot_40 <- create_dose_plot(df.exp.40.L, dose_label_40)
+plot_60 <- create_dose_plot(df.exp.60.L, dose_label_60)
+plot_100 <- create_dose_plot(df.exp.100.L, dose_label_100)
+plot_200 <- create_dose_plot(df.exp.200.L, dose_label_200)
+plot_500 <- create_dose_plot(df.exp.500.L, dose_label_500)
+
+
+# Combine plots into a 2x2 grid
+combined_plot <- grid.arrange(plot_20, plot_40, plot_60, plot_100 , plot_200 , plot_500 , ncol = 3)
+# combined_plot_S <- grid.arrange(plot_60_S, plot_100_S , plot_200_S , plot_500_S , ncol = 2)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/Dose modification plots.tiff",
+             plot = combined_plot, 
+             width = 15, height = 6, dpi = 400, units = "in")
+
+```
+# Efficacy vs Safety plots
+
+note: truncate the dataset at the first AE
+## Safety plot vs ORR_LDR
+
+```{r}
+df.exp.20 <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_20&10&5.rds")
+
+df.ER.20 <- df.exp.20  %>%
+        mutate( LAST=0,
+                EVENT=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where AE = 1 for each ID
+         mutate(first_event_day = ifelse(AE == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where AE = 0 or it's the first occurrence of AE= 1
+         filter((AE == 0 & DAY < first_event_day) | (AE == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = ifelse(any(AE == 1), max(DAY) - 1, max(DAY))) %>%
+         mutate(LAST = if_else(DAY == last_day, 1, LAST)) %>%
+          mutate(EVENT = if_else(DAY == last_day & any(AE == 1), 1, EVENT)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis.20 <- df.ER.20 %>% filter(LAST == 1)
+# first day exposure
+df.ER.ID.20 <- df.ER.20 %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID.20 <-  analysis.20[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ.20 <- merge(df.ER.ID.20, G.ID.20, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+df.exp.40 <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_40&20&10.rds")
+
+df.ER.40 <- df.exp.40  %>%
+        mutate( LAST=0,
+                EVENT=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where AE = 1 for each ID
+         mutate(first_event_day = ifelse(AE == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where AE = 0 or it's the first occurrence of AE= 1
+         filter((AE == 0 & DAY < first_event_day) | (AE == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = ifelse(any(AE == 1), max(DAY) - 1, max(DAY))) %>%
+         mutate(LAST = if_else(DAY == last_day, 1, LAST)) %>%
+          mutate(EVENT = if_else(DAY == last_day & any(AE == 1), 1, EVENT)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis.40 <- df.ER.40 %>% filter(LAST == 1)
+# first day exposure
+df.ER.ID.40 <- df.ER.40 %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID.40 <-  analysis.40[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ.40 <- merge(df.ER.ID.40, G.ID.40, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+
+df.exp.60 <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_60&40&20.rds")
+
+df.ER.60 <- df.exp.60  %>%
+        mutate( LAST=0,
+                EVENT=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where AE = 1 for each ID
+         mutate(first_event_day = ifelse(AE == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where AE = 0 or it's the first occurrence of AE= 1
+         filter((AE == 0 & DAY < first_event_day) | (AE == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = ifelse(any(AE == 1), max(DAY) - 1, max(DAY))) %>%
+         mutate(LAST = if_else(DAY == last_day, 1, LAST)) %>%
+          mutate(EVENT = if_else(DAY == last_day & any(AE == 1), 1, EVENT)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis.60 <- df.ER.60 %>% filter(LAST == 1)
+# first day exposure
+df.ER.ID.60 <- df.ER.60 %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID.60 <-  analysis.60[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ.60 <- merge(df.ER.ID.60, G.ID.60, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+
+df.exp.100 <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_100&60&40.rds")
+
+df.ER.100 <- df.exp.100  %>%
+        mutate( LAST=0,
+                EVENT=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where AE = 1 for each ID
+         mutate(first_event_day = ifelse(AE == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where AE = 0 or it's the first occurrence of AE= 1
+         filter((AE == 0 & DAY < first_event_day) | (AE == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = ifelse(any(AE == 1), max(DAY) - 1, max(DAY))) %>%
+         mutate(LAST = if_else(DAY == last_day, 1, LAST)) %>%
+          mutate(EVENT = if_else(DAY == last_day & any(AE == 1), 1, EVENT)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis.100 <- df.ER.100 %>% filter(LAST == 1)
+
+# first day exposure
+df.ER.ID.100 <- df.ER.100 %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID.100 <-  analysis.100[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ.100 <- merge(df.ER.ID.100, G.ID.100, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+
+df.exp.200 <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_200&100&60.rds")
+
+df.ER.200 <- df.exp.200  %>%
+        mutate( LAST=0,
+                EVENT=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where AE = 1 for each ID
+         mutate(first_event_day = ifelse(AE == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where AE = 0 or it's the first occurrence of AE= 1
+         filter((AE == 0 & DAY < first_event_day) | (AE == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = ifelse(any(AE == 1), max(DAY) - 1, max(DAY))) %>%
+         mutate(LAST = if_else(DAY == last_day, 1, LAST)) %>%
+          mutate(EVENT = if_else(DAY == last_day & any(AE == 1), 1, EVENT)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis.200 <- df.ER.200 %>% filter(LAST == 1)
+
+# first day exposure
+df.ER.ID.200 <- df.ER.200 %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID.200 <-  analysis.200[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ.200 <- merge(df.ER.ID.200, G.ID.200, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+df.exp.500 <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_500&200&100.rds")
+
+df.ER.500 <- df.exp.500  %>%
+        mutate( LAST=0,
+                EVENT=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where AE = 1 for each ID
+         mutate(first_event_day = ifelse(AE == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where AE = 0 or it's the first occurrence of AE= 1
+         filter((AE == 0 & DAY < first_event_day) | (AE == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = ifelse(any(AE == 1), max(DAY) - 1, max(DAY))) %>%
+         mutate(LAST = if_else(DAY == last_day, 1, LAST)) %>%
+          mutate(EVENT = if_else(DAY == last_day & any(AE == 1), 1, EVENT)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis.500 <- df.ER.500 %>% filter(LAST == 1)
+
+df.ER.ID.500 <- df.ER.500 %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID.500 <-  analysis.500[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ.500 <- merge(df.ER.ID.500, G.ID.500, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+
+
+logistic_regression_comparison <- function(df.ER.IDQ, TRUE_DH1, TRUE_DH2, x_var, y_var,Title) {
+  # Ensure x variable is numeric for log scale
+ 
+  ggplot() +
+  
+     # Logistic regression line for current dataset
+    geom_smooth(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]], color = "Logistic Regression"), 
+                method = "glm", method.args = list(family = "binomial")) +
+    geom_point(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]]), 
+               shape = "|", alpha = 0.5) +
+    
+      # Original True ER line for DH2
+    geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+    geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+    geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"), 
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+    
+    # Original True ER line for DH1
+    geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+    geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.8),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of ORR Event",
+      title = Title,
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    coord_cartesian(xlim = c(0.1, NA)) +
+    scale_x_log10(labels = custom_log_labels) +
+    scale_color_manual(values = c("Logistic Regression" = "black","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+}
+
+title1 <- "Logistic Regression- AE- 20mg"
+title2 <- "Logistic Regression- AE- 40mg"
+title3 <- "Logistic Regression- AE- 60mg"
+title4 <- "Logistic Regression- AE- 100mg"
+title5 <- "Logistic Regression- AE- 200mg"
+title6 <- "Logistic Regression- AE- 500mg"
+
+## Compare the true ER for DH1 and DH2
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH1")
+ORR_trueER_DH1 <- read.csv("True ER_ORR.csv")
+ORR_trueER_DH1$avgDoseTE <- ORR_trueER_DH1$DOSE
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR")
+ORR_trueER_DH2 <- read.csv("True ER_ORR_LDR_DH2.csv")
+
+CtroughOED_AE1 <- logistic_regression_comparison(df.ER.IDQ.20 , ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title1)
+CtroughOED_AE2 <- logistic_regression_comparison(df.ER.IDQ.40 , ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title2)
+CtroughOED_AE3 <- logistic_regression_comparison(df.ER.IDQ.60 , ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title3)
+CtroughOED_AE4 <- logistic_regression_comparison(df.ER.IDQ.100 , ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title4)
+CtroughOED_AE5 <- logistic_regression_comparison(df.ER.IDQ.200 , ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title5)
+CtroughOED_AE6 <- logistic_regression_comparison(df.ER.IDQ.500 , ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title6)
+
+AE_CtroughOED <- grid.arrange(CtroughOED_AE1, CtroughOED_AE2, CtroughOED_AE3, CtroughOED_AE4,CtroughOED_AE5,CtroughOED_AE6,ncol = 3)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR_ORR vs Safety_CtroughOED.tiff",
+      plot = AE_CtroughOED, 
+     width = 15, height = 8, dpi = 400, units = "in")
+
+
+df_combined <- bind_rows(df.ER.IDQ.20, df.ER.IDQ.40, df.ER.IDQ.60, df.ER.IDQ.100, df.ER.IDQ.200, df.ER.IDQ.500)
+df_combined$EVENTC1 <-df_combined$EVENT
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship")
+write.csv(df_combined, "df_ER_IDQ_LDR_DH2_Safety.csv", row.names = FALSE)
+
+title5 <- "Logistic Regression- AE- Ctrough1D"
+title6 <- "Logistic Regression- AE- Cavg1D"
+title7 <- "Logistic Regression- AE- CtroughOED"
+title8 <- "Logistic Regression- AE- CavgOED"
+
+Combine_AE1 <- logistic_regression_comparison(df_combined, ORR_trueER_DH1, ORR_trueER_DH2, "Ctrough1D", "EVENT", title5)
+Combine_AE2 <- logistic_regression_comparison(df_combined, ORR_trueER_DH1, ORR_trueER_DH2, "Cavg1D", "EVENT", title6)
+Combine_AE3 <- logistic_regression_comparison(df_combined, ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title7)
+Combine_AE4 <- logistic_regression_comparison(df_combined, ORR_trueER_DH1, ORR_trueER_DH2, "CavgOED", "EVENT", title8)
+
+AE_Combine <- grid.arrange(Combine_AE1, Combine_AE2, Combine_AE3, Combine_AE4,ncol = 2)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR_ORR vs Safety.tiff",
+      plot = AE_Combine, 
+     width = 10, height = 8, dpi = 400, units = "in")
+
+```
+## Safety plot vs PFS_LDR
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH1")
+PFS_trueER_DH1 <- read.csv("True ER_PFS.csv")
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR")
+PFS_trueER_DH2 <- read.csv("True ER_PFS_LDR_DH2.csv")
+PFS_trueER_DH1$avgDoseTE <- PFS_trueER_DH1$DOSE
+
+logistic_regression_comparison <- function(df.ER.IDQ, TRUE_DH1, TRUE_DH2, x_var, y_var,Title) {
+  # Ensure x variable is numeric for log scale
+ 
+  ggplot() +
+  
+     # Logistic regression line for current dataset
+    geom_smooth(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]], color = "Logistic Regression"), 
+                method = "glm", method.args = list(family = "binomial")) +
+    geom_point(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]]), 
+               shape = "|", alpha = 0.5) +
+    
+      # Original True ER line for DH2
+    geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+    geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+    geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"), 
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+    
+    # Original True ER line for DH1
+    geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+    geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.3),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of PFS Event",
+      title = Title,
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    coord_cartesian(xlim = c(0.1, NA)) +
+    scale_x_log10(labels = custom_log_labels) +
+    scale_color_manual(values = c("Logistic Regression" = "black","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+}
+
+PFS_AE1 <- logistic_regression_comparison(df_combined , PFS_trueER_DH1, PFS_trueER_DH2, "Ctrough1D", "EVENT", title5)
+PFS_AE2 <- logistic_regression_comparison(df_combined , PFS_trueER_DH1, PFS_trueER_DH2, "Cavg1D", "EVENT", title6)
+PFS_AE3 <- logistic_regression_comparison(df_combined , PFS_trueER_DH1, PFS_trueER_DH2, "CtroughOED", "EVENT", title7)
+PFS_AE4 <- logistic_regression_comparison(df_combined , PFS_trueER_DH1, PFS_trueER_DH2, "CavgOED", "EVENT", title8)
+
+AE_PFS <- grid.arrange(PFS_AE1, PFS_AE2, PFS_AE3, PFS_AE4,ncol = 2)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR_PFS vs Safety.tiff",
+      plot = AE_PFS, 
+     width = 10, height = 8, dpi = 400, units = "in")
+
+```
+# Efficacy vs Dose Reduction plots
+```{r}
+## no truncation
+Initial_dose_percentage <- function(data, target_dose, target_day = 600) {
+  result <- data %>%
+    select(ID, DOSE, DAY) %>%
+    count(DAY, DOSE, name = "freq") %>%
+    group_by(DAY) %>%
+    mutate(TOTAL = sum(freq)) %>%
+    ungroup() %>%
+    mutate(
+      percentage = (freq / TOTAL),
+      DOSE = as.factor(DOSE)
+    ) %>%
+    filter(DAY == target_day & DOSE == target_dose) %>%
+    pull(percentage)
+  
+  if (length(result) == 0) {
+    warning("No data found for the specified dose and day.")
+    return(NA)
+  }
+  
+  return(result)
+}
+
+
+DS_20 <-  Initial_dose_percentage (df.exp.20, 20)
+DR_20 <- (1-DS_20)
+
+
+DS_40 <-  Initial_dose_percentage (df.exp.40, 40)
+DR_40 <- (1-DS_40)
+
+
+DS_60 <-  Initial_dose_percentage (df.exp.60, 60)
+DR_60 <- (1-DS_60)
+
+
+DS_100 <-  Initial_dose_percentage (df.exp.100, 100)
+DR_100 <- (1-DS_100)
+
+
+DS_200 <-  Initial_dose_percentage (df.exp.200, 200)
+DR_200 <- (1-DS_200)
+
+
+DS_500 <-  Initial_dose_percentage (df.exp.500, 500)
+DR_500 <- (1-DS_500)
+
+
+doses <- c(20, 40, 60, 100, 200, 500)
+DR <- c(DR_20,DR_40,DR_60,DR_100,DR_200,DR_500)
+DR_data <- data.frame(DOSE = doses, DR = DR)
+
+## input true ER relationship
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH1")
+ORR_trueER_DH1 <- read.csv("True ER_ORR.csv")
+PFS_trueER_DH1 <- read.csv("True ER_PFS.csv")
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR")
+ORR_trueER_DH2 <- read.csv("True ER_ORR_LDR_DH2.csv")
+PFS_trueER_DH2 <- read.csv("True ER_PFS_LDR_DH2.csv")
+
+DR.Notrun <- left_join(ORR_trueER_DH2 , DR_data, by = "DOSE")
+
+logistic_regression_DR <- function(DR.ORR, TRUE_DH1, TRUE_DH2, x_var, y_var,Title) {
+  # Ensure x variable is numeric for log scale
+ 
+  ggplot() +
+  
+     geom_line(data = DR.ORR, aes(x = .data[[x_var]], y = DR, color = "Dose reduction"), size = 1.5) +
+    geom_text(data = DR.ORR, aes(x = .data[[x_var]], y = DR, label = DR, color = "Dose reduction"),
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+      # Original True ER line for DH2
+    geom_line(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 1.5) +
+    geom_point(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH2"), size = 2) +
+    geom_text(data = TRUE_DH2, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE, color = "True ER_DH2"),
+              vjust = 0.8, hjust = -0.4,angle = -50, size = 3.5) +
+
+    # Original True ER line for DH1
+    geom_line(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+    geom_text(data = TRUE_DH1, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE),
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.8),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of ORR&DR",
+      title = Title,
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    coord_cartesian(xlim = c(0.1, NA)) +
+    scale_x_log10(labels = custom_log_labels) +
+    scale_color_manual(values = c("Dose reduction" = "black","True ER_DH2" = "blue", "True ER_DH1" = "forestgreen"))
+}
+
+title5 <- "No Truncation- AE_ Ctrough1D"
+title6 <- "No Truncation- AE- Cavg1D"
+title7 <- "No Truncation- AE_ CtroughOED"
+title8 <- "No Truncation- AE- CavgOED"
+title9 <- "No Truncation- AE- DOSE"
+title10 <- "No Truncation- AE- CavgTE"
+
+Combine_AE1 <- logistic_regression_DR(DR.Notrun, ORR_trueER_DH1, ORR_trueER_DH2, "Ctrough1D", "EVENT", title5)
+Combine_AE2 <- logistic_regression_DR(DR.Notrun, ORR_trueER_DH1, ORR_trueER_DH2, "Cavg1D", "EVENT", title6)
+Combine_AE3 <- logistic_regression_DR(DR.Notrun, ORR_trueER_DH1, ORR_trueER_DH2, "CtroughOED", "EVENT", title7)
+Combine_AE4 <- logistic_regression_DR(DR.Notrun, ORR_trueER_DH1, ORR_trueER_DH2, "CavgOED", "EVENT", title8)
+Combine_AE5 <- logistic_regression_DR(DR.Notrun, ORR_trueER_DH1, ORR_trueER_DH2, "DOSE", "EVENT", title9)
+Combine_AE6 <- logistic_regression_DR(DR.Notrun, ORR_trueER_DH1, ORR_trueER_DH2, "CavgTE", "EVENT", title10)
+AE_Combine <- grid.arrange(Combine_AE1, Combine_AE2, Combine_AE3, 
+                           Combine_AE4,Combine_AE5, Combine_AE6, ncol = 3)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH2_LDR_ORR vs DR_Notruncation.tiff",
+      plot = AE_Combine, 
+     width = 15, height = 8, dpi = 400, units = "in")
+
+```
+
+

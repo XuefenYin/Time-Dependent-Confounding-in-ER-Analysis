@@ -1,0 +1,376 @@
+---
+title: "ER1_Constant dosing with 1 DOSE levels(DH1)"
+author: "Xuefen Yin"
+date: "2024-12-23"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+rm(list=ls(all=TRUE))
+library(tidyverse)
+library(mrgsolve)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(gridExtra)
+library(zoo)
+library(patchwork)
+
+new_path <- paste("C:/rtools44/usr/bin", "C:/rtools44/mingw64/bin", Sys.getenv("PATH"), sep=";")
+Sys.setenv(PATH = new_path)
+```
+
+# Simulation code
+
+The simulation procedure follows the following steps:
+
+1.  **Create common functions**
+
+-   For the loop function, each iteration of the loop contains:
+
+    a.  Bootstrap individual PK parameters based on the specified sample size with replacement, and adjust them to let the final PK profile reaches steady-state at day 5.
+    b.  Run the PK simulation to generate PK profiles and calculate relevant exposure metrics;
+    c.  Generate TTE data based on the defined event onset settings and censoring percentage;
+    d.  Create the df.ER dataset by integrating the TTE dataset to exposure metrics dataset, aligning on time points.This process involves handling each ID individually and combining them sequentially. For each ID:1) Extract all records for the selected ID; 2)Determine the last day in the dosing record for this ID and compare it with its corresponding time point in the TTE dataset (for instance, ID=10 is matched with the TTE dataset's 10th time point); 3) If the last dosing day is greater than or equal to the TTE time point, remove any data beyond this time and align the EVENT from TTE with the new final day of the dosing record; If the last dosing day is less than the TTE time point, the EVENT is censored;
+    e.  Create df.ER.IDQ dataset, including both time dependent and time independent exposure metrics;
+    f.  Perform linear logistic regression analysis;
+    g.  Abstract "Slope","AIC", "P.Value", and save results.
+
+2.  **Input PK parameters and PK Model**
+
+-   Load the individual PK parameter dataset;
+
+-   Load a two-compartment PK model;
+
+3.  **Define Simulation Parameters and run simulation**
+
+-   Specify the sample size, Weibull function parameters, and the percentage of censoring;Generate 500 random seeds for reproducibility and iterate through them in a loop.
+
+-   Run Simulations and Save Results: For each combination of conditions (sample size, censoring percentage, and event onset setting), perform the simulation and save the results.
+
+## 1.common functions
+```{r}
+# loop function
+loop <- function(DI, Case.fix, seed, parameter, event.shape, event.scale, Sample_size,Censor.percentage){
+       # Bootstrap individual parameters
+       seed1 <- seed+6
+       set.seed(seed1)
+       ID.unique <- unique(parameter$SUBJID) 
+       ID.bootstrap <- sample(ID.unique, Sample_size, replace = TRUE)
+
+       iparameter <- data.frame()
+
+       for (i in 1:length(ID.bootstrap)) {
+         id <- ID.bootstrap[i]
+         rows_for_id <- parameter[parameter$SUBJID == id, ]
+         rows_for_id$NEWID <- i
+         iparameter<- bind_rows(iparameter, rows_for_id)
+       }
+       
+       # adjust the PK parameters
+       iparameter <- iparameter %>% rename(ID=NEWID)
+
+
+       if (Case.fix == 1) {
+           iparameter.allID <- iparameter%>%
+                            mutate(KA=KA*20,
+                            CL=CL*18)  
+
+       } else if (Case.fix == 2) {
+           iparameter.allID <- iparameter%>%
+                            mutate(KA=KA*20,
+                            CL=CL*5)   
+       } else if (Case.fix == 3) {
+           iparameter.allID <- iparameter%>%
+                     mutate(KA=KA*3,
+                     CL=CL/120, 
+                     V2=V2/40,
+                     V3=V3/30,
+                     Q=Q/50)  
+       } 
+
+       # run the simulation to get PK profiles
+       evnt <- ev(amt=60,ii= DI*24,addl=599, ID=1:Sample_size)
+
+       out <- mod%>%
+              idata_set(iparameter.allID) %>%
+              ev(evnt)%>%
+              mrgsim(recover = c("CL","HD","CREAT","SUBJID"), 
+                     carry.out = "EVID", 
+                     recsort = 3,
+                     atol = 1e-12, 
+                     rtol = 1e-10,
+                     tgrid = seq(0, 14400, by = 1))
+       
+       # clear the output
+        exp.1 <- out %>% 
+                as_tibble() %>% 
+                distinct() %>%
+                group_by(time) %>%
+                filter(EVID != 1) %>%
+                ungroup()%>%
+                mutate(DAY = ceiling(time/24),
+                       CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+                       AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+                filter(time > 0)%>%
+                mutate(Cavg = AUC/time)%>%  # average concentration time to event
+                group_by(ID, DAY) %>%
+                mutate(Cmax = max(CP),
+                       Ctrough = tail(CP,1)) %>%
+                ungroup()%>%
+                mutate(DOSE = 60)%>%
+                 select(-EVID,-GUT,-CENT,-PERIPH)%>%
+                 rename(AUCTE=AUC,
+                        CavgTE= Cavg)%>%
+                 filter(time %% 24 == 0)%>%
+                 select(ID,SUBJID,DAY,time,DOSE,CL,CP,Cmax,Ctrough,AUCTE,CavgTE)%>%
+               #  filter(time %% 24 == 0)%>%
+                 mutate(DOSE = if_else(is.na(DOSE), 0, DOSE))
+       
+
+        # get the daily AUC
+        AUC1D <- exp.1 %>%
+                arrange(ID, DAY) %>%
+                group_by(ID) %>%
+                # Calculate the last AUCTE for each day for each ID
+                group_by(DAY, .add = TRUE) %>%
+                summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+              # Calculate daily AUC for each ID
+                group_by(ID) %>%
+                mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+                ungroup()%>%
+                select(-LastAUCTE)%>%
+                mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+         Combined.data <- left_join(exp.1, AUC1D, by = c("ID", "DAY"))
+
+       # calculate all possible necessary exposure matrix
+         exp.2 <- Combined.data%>%
+                group_by(ID) %>%
+                mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+                       AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+                       AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+                       AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+                       Cavg = AUC1D / 24,
+                       Cavg1W = AUC1W / (24*7),
+                       Cavg2W = AUC2W / (24*14),
+                       Cavg3W = AUC3W / (24*21),
+                       Cavg4W = AUC4W / (24*28)) %>%
+                ungroup()%>%
+                mutate(AUC1W = ifelse(is.na(AUC1W), AUCTE, AUC1W),
+                       AUC2W = ifelse(is.na(AUC2W), AUCTE, AUC2W),
+                       AUC3W = ifelse(is.na(AUC3W), AUCTE, AUC3W),
+                       AUC4W = ifelse(is.na(AUC4W), AUCTE, AUC4W),
+                       Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+                       Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+                       Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+                       Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))
+
+       # only maintain the exposure matrix used for ER analysis
+         df.exp <- exp.2 %>%select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W,-Cavg3W)
+
+         df.exp <- df.exp %>%
+                 group_by(ID) %>%
+                 mutate(
+                       Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                       Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                       Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28]),
+                       CavgTE2WC1 = if_else(DAY > 14, CavgTE, Cavg2W[DAY == 14]),
+                       CavgTE4WC1 = if_else(DAY > 28, CavgTE, Cavg4W[DAY == 28]),
+                       CavgSS = max(tail(Cavg, n = min(100, length(Cavg)))),
+                       Cavg1WSS = max(tail(Cavg1W, n = min(100, length(Cavg1W)))),
+                       Cavg2WSS = max(tail(Cavg2W, n = min(100, length(Cavg2W)))),
+                       Cavg4WSS = max(tail(Cavg4W, n = min(100, length(Cavg4W)))),
+                       CavgTESS = max(tail(CavgTE, n = min(100, length(CavgTE))))
+                       ) %>%
+                 ungroup()
+
+       # Generate TTE dataset
+       set.seed(seed)
+       #Calculate the number of events and censored observations based on the censoring percentage
+       n.censor= ceiling(Censor.percentage * Sample_size)
+       n.event = Sample_size - n.censor
+       # using weibull function to generate event time points(day)
+       Sample.event <- tibble(ID = 1:n.event) %>% 
+                       mutate(time = 1 + ceiling(rweibull(n.event, shape = event.shape, scale = event.scale )),
+                              event=1) 
+
+       set.seed(seed+6)
+       # censored observations are randomly selected from the follow up period
+       censor.time <- sample(1:600, n.censor, replace = TRUE)
+       Sample.censor <- tibble(ID = 1:n.censor) %>% 
+                        mutate(time = censor.time,event=0) 
+
+       merge.data <- rbind(Sample.event, Sample.censor)
+
+       TTE <- merge.data %>%
+              mutate(event = if_else(time > 600, 0, event),
+              ID=sample(1:Sample_size, n(), replace=FALSE))%>%
+              arrange(ID)
+
+      # Create the df.ER dataset by integrating the TTE dataset to exposure metrics dataset
+      df.ER <- data.frame()
+
+      for (i in 1:Sample_size) {
+          single <- TTE$time[i]
+          rows_for_id <- df.exp[df.exp$ID == i, ]
+          max_day <- max(rows_for_id$DAY, na.rm = TRUE)
+  
+        if (max_day < single) {
+          rows_for_id$EVENT <- 0
+          max_row <- which.max(rows_for_id$DAY)
+          rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+          } else {
+          #Cut off the extra data that Day > single
+          rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+          max_row <- which.max(rows_for_id$DAY)
+           #match the Event when TTE has censored values
+          rows_for_id$EVENT <- ifelse(1:nrow(rows_for_id) == max_row, TTE$event[TTE$ID == i], 0)
+          rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+          }
+          df.ER <- bind_rows(df.ER, rows_for_id)
+      }
+      # only leave the last observation for each ID
+      analysis <- df.ER %>% filter(LAST == 1)
+
+      #Create df.ER.IDQ dataset, including both time dependent and time independent exposure metrics;
+      ## abstract first day exposure metrics
+       df.ER.ID <- df.ER %>%
+            filter(DAY == 1) %>%
+            select(SUBJID, ID, DOSE, CL, Ctrough, Cavg, Cavg2WC1,Cavg4WC1 )%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+       # last day CavgTE and EVENT & DAY
+       G.ID <-  analysis[,c("ID","DAY", "Ctrough","Cavg","CavgSS","Cavg1W","Cavg2W","Cavg2WC1","Cavg4WC1","CavgTE", 
+                            "CavgTE2WC1","CavgTE4WC1","Cavg2WSS","Cavg4WSS","EVENT","LAST")]%>%
+                 rename(CtroughOED=Ctrough,
+                       CavgOED=Cavg,
+                       Cavg1WOED=Cavg1W,
+                       Cavg2WOED=Cavg2W,
+                       Cavg2WC1OED=Cavg2WC1,
+                       Cavg4WC1OED=Cavg4WC1)
+
+
+       df.ER.IDQ <- merge(df.ER.ID, G.ID, by = "ID")%>%
+                    select(ID, SUBJID, DAY, DOSE, CL, LAST,EVENT, 
+                           Ctrough1D, CtroughOED, Cavg1D,CavgSS,CavgOED,Cavg1WOED,
+                           Cavg2WC1,Cavg2WSS,Cavg2WOED,Cavg2WC1OED,
+                           Cavg4WC1,Cavg4WSS,Cavg4WC1OED,
+                           CavgTE,CavgTE2WC1,CavgTE4WC1)
+       
+       #1. conduct linear logistic regression
+       covariates <- colnames(df.ER.IDQ)[c(5,8:23)]
+       logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+       logistic_Results <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+       logistic_result <- logistic_analysis(logistic_Results,covariates)%>%
+                          rownames_to_column(var = "Variable")
+       
+        #2. univariate Cox PH regression_continuous covariate
+        univ_formulas <- sapply(covariates, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+        univ_models <- lapply(univ_formulas, function(x) { coxph(x, data = df.ER.IDQ) })
+        univ_con_result <- univ_con(univ_models)
+
+       return(list(logistic_result = logistic_result, univ_cox_result = univ_con_result))
+} 
+
+#extract results from logistic regression results
+logistic_analysis <- function(logistic_Results, covariates) {
+  logistic_summaries <- lapply(logistic_Results, summary)
+  
+  logistic.results <- lapply(seq_along(logistic_summaries), function(i) {
+    x <- logistic_summaries[[i]]
+    P.value <- signif(x$coefficients[2, 4], digits=3)
+    Slope <- signif(x$coefficients[2, 1], digits=3)
+    AIC <- round(AIC(logistic_Results[[i]]), 1)   
+    res <- c(Slope, AIC, P.value)
+    names(res) <- c("Slope","AIC", "P.Value")
+    return(res)
+  })
+  
+  # Convert the list of results to a dataframe
+  result_df <- as.data.frame(do.call(rbind, logistic.results))
+  row.names(result_df) <- covariates  
+  
+  return(result_df)
+}
+
+#3.extract results from univariate Cox PH models_continuous
+univ_con <- function(univ_models) {
+    univ_results <- lapply(univ_models, function(x) {
+    x <- summary(x)  # Summarize the model
+    # Extract and format the results
+    P.value <- signif(x$wald["pvalue"], digits=3)
+    wald.test <- signif(x$wald["test"], digits=3)
+    beta <- signif(x$coef[1], digits=3)  # Coefficient beta
+    HR <- signif(exp(x$coef[1]), digits=3)  # Hazard Ratio (HR)
+    HR.confint.lower <- signif(x$conf.int[,"lower .95"], 3)
+    HR.confint.upper <- signif(x$conf.int[,"upper .95"], 3)
+    HR <- paste0(HR, " (",
+                 HR.confint.lower, "-", HR.confint.upper, ")")
+    res <- c(beta, HR, wald.test, P.value)
+    names(res) <- c("beta", "HR (95% CI for HR)", "wald.test", "P.Value")
+    return(res)
+  })
+  # Convert the list of results to a dataframe
+  result_df <- t(as.data.frame(univ_results))
+  return(result_df)
+}
+
+```
+##2. input the initial dose and parameter dataset
+```{r}
+# Load the individual PK parameter dataset
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis")
+parameter <- read.csv("estimated individual PK parameters.csv")
+#  mrgsolve model
+mod <- mod<- mread_cache("KP_2com.mod") 
+```
+
+## 3. Define Simulation Parameters and run simulation 
+
+Two TTE scenarios will be explored:
+
+-   EO1: event.shape = 0.65, event.scale = 100;
+
+-   EO2: event.shape = 2, event.scale = 240;
+
+The sample size will be explored: 20, 50, 100, 250, 500, and 1000;
+
+Two censored percentage will be explored: Censor.percentage= 25% or 80%.
+
+The drug with PK2 profile was explored, but the code are able to used to evaluate other PK profiles.
+
+```{r include=FALSE}
+Sample_size = 20
+
+# dose interval could be changed 
+DI = 1 # DAY
+Case.fix <- 2
+
+event.shape <- 0.65
+event.scale <- 100
+
+Censor.percentage <- 0.8
+
+# Set a fixed seed for reproducibility
+set.seed(2024)
+# Randomly select 100 seeds from 1 to 100,000
+seeds <- sample(10:10000, 500)
+
+logistic_test <- list()
+univ_cox_result <- list()
+
+for (seed in seeds) {
+  simulation_result <- loop(DI, Case.fix, seed, parameter, event.shape, event.scale,Sample_size,Censor.percentage)
+  logistic_test[[as.character(seed)]] <- simulation_result$logistic_result
+  univ_cox_result[[as.character(seed)]] <- simulation_result$univ_cox_result
+}
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER1 analysis/ER1_DH1_1Dose_size_censor")
+saveRDS(logistic_test, "20ID_EO1_censor0.8_HL24_logit.rds")
+saveRDS(univ_cox_result, "20ID_EO1_censor0.8_HL24_cox.rds")
+```
+
+

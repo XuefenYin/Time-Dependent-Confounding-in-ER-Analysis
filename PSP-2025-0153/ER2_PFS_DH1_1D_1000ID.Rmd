@@ -1,0 +1,2632 @@
+---
+title: "True inverse PFS_DH1_1 DOSE Level"
+author: "Xuefen Yin"
+date: "2024-8-21"
+output: pdf_document
+---
+
+# R setup
+```{r setup, echo = F}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+rm(list=ls(all=TRUE))
+
+library(tidyverse)
+library(mrgsolve)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(gridExtra)
+library(muhaz)
+library(zoo)
+library(ggExtra)
+library(patchwork)
+library(ggridges)
+library(purrr)
+library(grid)
+library(cowplot)
+library(openxlsx)
+library(readxl)
+library(brms) ## Emax
+
+# new_path <- paste("C:/rtools40/usr/bin", "C:/rtools40/mingw64/bin", Sys.getenv("PATH"), sep=";")
+# Sys.setenv(PATH = new_path)
+
+theme_set(theme_bw())
+```
+#1 Common functions(run one time)
+
+Note: Need to combine the plotting functions when all details are settle down
+
+##1.1 common function for data visualization 
+
+```{r}
+custom_log_labels <- function(x) {
+  ifelse(x < 10, 
+         sprintf("%.1f", x),  # One decimal place for numbers < 10
+         sprintf("%.0f", x))  # No decimal places for numbers >= 10
+}
+
+custom_theme <- theme_classic() +
+  theme(
+    panel.grid.major = element_line(color = "gray70", linewidth = 0.5),  # Major grid lines
+    panel.grid.minor = element_line(color = "gray90", linewidth = 0.25)  # Minor grid lines
+  )
+
+KM_plot_G <- function(km_object, data, title_prefix, group_labels, colors, plot_x_scale = 600, save_path) {
+
+    if (length(group_labels) != length(colors)) {
+    stop("The length of group_labels and colors must be the same")
+  }
+  
+  plot <- ggsurvplot(
+    km_object,
+    data = data,
+    surv.median.line = "hv",
+    conf.int = TRUE,
+    #pval = TRUE,
+    #pval.method = TRUE,
+    risk.table = TRUE,
+    risk.table.y.text = FALSE,
+    tables.theme = theme_cleantable(),
+    tables.height = 0.25,
+    palette = colors,
+    legend.labs = group_labels,
+    xlim = c(0, plot_x_scale),
+    legend.title = element_blank() 
+  ) + labs(
+    y = "Probability of No Event",
+    x = "Days",
+    title = paste("True ER relationship -", title_prefix)
+  )
+
+  plot$plot <- plot$plot +
+    theme(plot.subtitle = element_text(size = 10)) +
+    scale_x_continuous(breaks = seq(0, plot_x_scale, by = 50))
+
+  if (identical(data, analysis)) {
+   ggsave(filename = save_path, plot = plot$plot, width = 7, height = 5, dpi = 400, units = "in")
+  }
+
+  return(plot)
+}
+
+KM_plot_Q <- function(km_object, data, title_prefix,group_labels, colors,plot_x_scale = 600, save_path) {
+  plot <- ggsurvplot(
+    km_object,
+    data = data,
+    surv.median.line = "hv",
+    conf.int = TRUE,
+    #pval = TRUE,
+   # pval.method = TRUE,
+    risk.table = TRUE,
+    risk.table.y.text = FALSE,
+    tables.theme = theme_cleantable(),
+    tables.height = 0.25,
+    palette = colors,
+    legend.labs = group_labels,
+    xlim = c(0, plot_x_scale),
+    legend.title = element_blank() 
+  )+ labs( y = "Probability of No Event",
+           x = "Days",
+          title = paste("True ER relationship -",title_prefix)) 
+
+   plot$plot <- plot$plot +
+   theme(plot.subtitle = element_text(size = 10))+
+   scale_x_continuous(breaks = seq(0, plot_x_scale, by = 50))
+   
+  # # Save the plot
+   ggsave(filename = save_path, plot = plot$plot, width = 7, height = 5, dpi = 400, units = "in")
+  
+  return(plot)
+}
+
+###KM plot with no strata
+KM_plot <- function(km_object, data, title_prefix,plot_x_scale = 600, save_path) {
+    plot <- ggsurvplot(
+    km_object,
+    data = data,
+    surv.median.line = "hv",
+    color = "black",
+    conf.int.fill = "grey45",
+    conf.int = TRUE,
+    title = paste("True ER -",title_prefix),
+    xlab = "Days",
+    ylab = "Probability of no event",
+    xlim = c(0, plot_x_scale),
+    risk.table = "abs_pct",
+    risk.table.y.text = FALSE,
+    cumcensor = TRUE,
+    tables.theme = theme_cleantable(),
+    tables.height = 0.15,
+    legend = "none"
+  )
+  
+  plot$plot <- plot$plot +
+    theme(
+      plot.title = element_text(size = 14),
+      plot.subtitle = element_text(size = 12),
+      axis.title = element_text(size = 14),
+      axis.text = element_text(size = 12)
+    ) +
+    scale_x_continuous(breaks = seq(0, plot_x_scale, by = 50)) +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+     # axis.text.x = element_text(angle = 60)
+    )
+  
+  # # Save the plot
+   ggsave(filename = save_path, plot = plot$plot, width = 5, height = 4, dpi = 400, units = "in")
+   
+  return(plot)
+}
+
+
+Typical_plot_DH2 <- function(data, y_var, title) {
+  ggplot(data, aes(x = DAY, y = !!sym(y_var), color = as.factor(ID))) +
+    geom_point() +
+    geom_line() +
+    theme_classic() +
+    theme(
+      panel.background = element_rect(fill = "white"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      plot.title = element_text(hjust = 0.5),
+      legend.key.size = unit(0.5, "lines"), # Reduce the legend key size
+      legend.text = element_text(size = 6) # Reduce the legend text size
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    labs(x = "Time (days)",
+         y = y_var,
+         title = title,
+         color = "ID")
+}
+
+# genetate plot of PK using ID having the median Ctrough at the end of first doing interval
+CP_plot <- function(data, title) {
+  ggplot(data, aes(x = time, y = CP, color = as.factor(ID))) +
+    geom_point() +
+    geom_line() +
+    scale_y_log10() +
+    theme_classic() +
+    theme(
+      panel.background = element_rect(fill = "white"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    labs(x = "Time (hours)", y = "Concentration", title = title, color = "ID")
+}
+
+# Compare the percentage of Event with Percentage of exposure metrics reaching to SS
+Typical_plot <- function(data, y_var, title, patient_SS, CumEvent, FD) {
+  # Assuming CumEvent includes DAY and a column for cumulative percentage named PEvent
+  
+  # Merge the CumEvent data into the main data frame on the DAY column
+  # Ensure PEvent is scaled correctly if it's not already 0 to 100
+  data <- data %>%
+    left_join(CumEvent %>% select(DAY, PEvent), by = "DAY") %>%
+    left_join(FD %>% select(DAY, PNSS), by = "DAY")
+  
+  
+  # Determine the max value for y_var to set the primary y-axis limit
+  max_y_value <- max(data[[y_var]], na.rm = TRUE)
+  transformation_factor <- max_y_value * 1.1 / 100
+  
+  plot <- ggplot(data, aes(x = DAY)) +
+      
+      geom_col(data = CumEvent, aes(x = DAY, y = PEvent * transformation_factor), color = "red", fill = "red", alpha = 0.01)+ 
+     # geom_point(aes(y = !!sym(y_var)), color = "blue") +
+     #geom_point(aes(y = !!sym(y_var), color = as.factor(ID))) +
+     #geom_line(aes(y = !!sym(y_var), color = as.factor(ID)), size =2) +
+      geom_step(data = FD, aes(x = DAY, y = PNSS * transformation_factor), color = "limegreen", size = 2) +
+      geom_line(aes(y = !!sym(y_var)), color = "blue", size =2) +
+      scale_y_continuous(name = y_var, 
+                         limits = c(0, max_y_value * 1.1),  # Adjust the primary y-axis scale
+                         sec.axis = sec_axis(~ . / transformation_factor, name = "Cumulative Events%/ID% reach to SS")) + 
+      #geom_line(data = CumEvent, aes(x = DAY, y = PEvent*transformation_factor), color = "red", size=1) +
+     
+      theme_classic() +
+      theme(
+        panel.background = element_rect(fill = "white", color = "black"),
+        panel.grid.major.y = element_line(color = "grey"),
+        panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+        panel.grid.major.x = element_line(color = "grey"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none", 
+        plot.title = element_text(hjust = 0.5)
+      ) +
+      scale_color_brewer(palette = "Paired") +
+     labs(x = "Time (days)", y = y_var, title = title)
+    #labs(x = "Time (days)", y = y_var, title = title, color = "ID")
+
+  # Add vertical lines and annotations for first steady days
+ 
+   for(i in unique(patient_SS$P)) {
+      id_days <- patient_SS %>%
+      filter(P == i)
+    
+        plot <-  plot + 
+        geom_vline(xintercept = id_days$DAY, linetype = "dashed", color = "black") +
+        annotate("text", x =id_days$DAY, y = max_y_value/5, label = id_days$Day_perc, 
+                 vjust = 1.2, hjust = 0, size = 5, angle = 90,color = "black", fontface = "bold")
+    }
+  
+    
+  return(plot)
+}
+
+logistic_regression_PK <- function(summary_data, combined_data, df.ER.IDQ, x_var, y_var) {
+  # Ensure x variable is numeric for log scale
+  combined_data[[x_var]] <- as.numeric(combined_data[[x_var]])
+  
+  ggplot() +
+  
+    #    # True ER Logistic regression line
+    # geom_smooth(data = combined_data, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER Logistic Regression"), 
+    #             method = "glm", method.args = list(family = "binomial")) +
+    # geom_point(data = combined_data, aes(x = .data[[x_var]], y = .data[[y_var]]), 
+    #            shape = "|", alpha = 0.5) +
+   
+     # Logistic regression line for current dataset
+    geom_smooth(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]], color = "Logistic Regression"), 
+                method = "glm", method.args = list(family = "binomial")) +
+    geom_point(data = df.ER.IDQ, aes(x = .data[[x_var]], y = .data[[y_var]]), 
+               shape = "|", alpha = 0.5) +
+    
+    # Original True ER line
+    geom_line(data = summary_data, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER"), size = 1.5) +
+    geom_point(data = summary_data, aes(x = .data[[x_var]], y = .data[[y_var]], color = "True ER"), size = 2) +
+    geom_text(data = summary_data, aes(x = .data[[x_var]], y = .data[[y_var]], label = DOSE), 
+              vjust = 0.2, hjust = -0.4,angle = 75, size = 3.5) +
+    
+    custom_theme +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.25),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(
+      x = x_var,
+      y = "Probability of PFS Event",
+      title = paste("Logistic Regression -", x_var),
+      color = "Model"
+    ) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    scale_x_log10(labels = custom_log_labels) +
+    scale_color_manual(values = c("True ER Logistic Regression" = "blue", "Logistic Regression" = "black", "True ER" = "forestgreen"))
+}
+
+logistic_regression_PD <- function(data, predictor, response) {
+  # Ensure predictor is numeric for log scale
+  data[[predictor]] <- as.numeric(data[[predictor]])
+
+  plot <- data %>%
+    ggplot(aes_string(x = predictor, y = response)) +
+    geom_point(shape = "|") +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    scale_x_log10() +
+    labs(x = predictor,
+         y = "Probability of Event",
+         title = paste("Logistic Regression -", predictor))
+
+  return(plot)
+}
+
+Tumor_Dose_plot <- function(id, data, response_duration, pfs_linear) {
+  data <- data %>%
+    filter(ID == id) 
+  first_day <- response_duration$First_Response_Day[response_duration$ID == id]
+  last_day <- response_duration$Last_Response_Day[response_duration$ID == id]
+  pfs_day <- pfs_linear$Day[pfs_linear$ID == id]
+  
+  max_tumor <- max(data$Tumor, na.rm = TRUE)
+  max_dose <- max(data$DOSE, na.rm = TRUE)
+  
+  p <- ggplot(data, aes(x = DAY)) +
+    geom_point(aes(y = DOSE / max_dose * max_tumor), color = "springgreen4", size = 1) +
+    geom_line(aes(y = Tumor), size = 1.5, color = "black") +
+    geom_line(aes(y = TumorB * 1.2), linetype = "dashed", color = "red", size = 0.5) +
+    geom_line(aes(y = TumorB * 0.7), linetype = "dashed", color = "navyblue", size = 0.5) +
+    theme_classic() +
+    geom_vline(xintercept = first_day, color = "navyblue") +
+    annotate("text", x = first_day, y = max_tumor * 0.75, label = as.character(first_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = last_day, color = "navyblue") +
+    annotate("text", x = last_day, y = max_tumor, label = as.character(last_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = pfs_day, color = "red") +
+    annotate("text", x = pfs_day, y = max_tumor * 0.75, label = as.character(pfs_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "red", fontface = "bold") +
+    labs(
+      x = "Time (Days)",
+      y = "Tumor size (mm)",
+      title = paste("ID", id,"-", unique(data$DOSE),"mg")
+    ) +
+    scale_y_continuous(
+      name = "Tumor size (mm)",
+      sec.axis = sec_axis(~ . * max_dose  / max_tumor, name = "Dose (mg)", 
+                          breaks = seq(0, max_dose , by = 20)),
+      limits = c(0, NA)
+    ) +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      axis.text.x = element_text(size = 8, angle = 0),
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(hjust = 0.5)
+    )
+  
+  return(p)
+}
+
+PKPD_profile_plot <- function(id, data, response_duration, pfs_linear) {
+  data <- data %>% filter(ID == id) 
+  first_day <- response_duration$First_Response_Day[response_duration$ID == id]
+  last_day <- response_duration$Last_Response_Day[response_duration$ID == id]
+  pfs_day <- pfs_linear$Day[pfs_linear$ID == id]
+  
+  max_tumor <- max(data$Tumor, na.rm = TRUE)
+  max_CP <- max(data$CP, na.rm = TRUE)
+  min_CP <- min(data$CP[data$CP > 0], na.rm = TRUE)  # Minimum non-zero CP value
+  
+  p <- ggplot(data, aes(x = DAY)) +
+    geom_point(aes(y = scales::rescale(log10(CP), to = c(0, max_tumor))), color = "springgreen4", size = 1) +
+    geom_line(aes(y = Tumor), size = 1.5, color = "black") +
+    geom_line(aes(y = TumorB * 1.2), linetype = "dashed", color = "red", size = 0.5) +
+    geom_line(aes(y = TumorB * 0.7), linetype = "dashed", color = "navyblue", size = 0.5) +
+    theme_classic() +
+    geom_vline(xintercept = first_day, color = "navyblue") +
+    annotate("text", x = first_day, y = max_tumor * 0.75, label = as.character(first_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = last_day, color = "navyblue") +
+    annotate("text", x = last_day, y = max_tumor, label = as.character(last_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "navyblue", fontface = "bold") +
+    geom_vline(xintercept = pfs_day, color = "red") +
+    annotate("text", x = pfs_day, y = max_tumor * 0.75, label = as.character(pfs_day), vjust = 1.2, hjust = 0, size = 3, angle = 0, color = "red", fontface = "bold") +
+    labs(
+      x = "Time (Days)",
+      y = "Tumor size (mm)",
+      title = paste("ID", id,"-", unique(data$DOSE),"mg")
+    ) +
+    scale_y_continuous(
+      name = "Tumor size (mm)",
+      sec.axis = sec_axis(
+        ~ 10^(. * (log10(max_CP) - log10(min_CP)) / max_tumor + log10(min_CP)),
+        name = "Plasma concentration (ng/ml)",
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      ),
+      limits = c(0, NA)
+    ) +
+    theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      panel.grid.major.y = element_line(color = "grey"),
+      panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+      panel.grid.major.x = element_line(color = "grey"),
+      legend.background = element_rect(fill = "transparent"),
+      axis.text.x = element_text(size = 8, angle = 0),
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(hjust = 0.5)
+    )
+  
+  return(p)
+}
+
+
+custom_table_theme <- ttheme_minimal(
+  core = list(fg_params = list(fontsize = 8),  # Reduced font size for table content
+              bg_params = list(fill = "white", col = "black")),
+  colhead = list(fg_params = list(fontsize = 8, fontface = "bold"),  # Slightly larger, bold column headers
+                 bg_params = list(fill = "grey95", col = "black"))
+)
+
+generate_PFS_conc_plot <- function(conc, conc_IDQ, data1, data2, Index) {
+ 
+   input_variable <- c(conc, conc_IDQ)
+  
+ # Function to safely select columns and add Trial
+  safe_select_and_mutate <- function(df, vars, trial_name) {
+    tryCatch({
+      df %>% 
+        select(all_of(vars)) %>% 
+        mutate(Trial = trial_name)
+    }, error = function(e) {
+      message(paste("Error in dataset for trial", trial_name, ":", e$message))
+      message("Columns in this dataset: ", paste(colnames(df), collapse = ", "))
+      return(NULL)
+    })
+  }
+  
+  # Selecting the input variable from all datasets
+    if (Index == 1) {
+    datasets <- list(data1 = "True ER", data2 = "4 Dose level")
+    trial_order <- c("True ER", "4 Dose level")
+  } else if (Index == 2) {
+    datasets <- list(data1 = "True ER", data2 = "Observation")
+    trial_order <- c("True ER", "Observation")
+  } else if (Index == 3) {
+    datasets <- list(data1 = "4 Dose level", data2 = "Observation")
+    trial_order <- c("4 Dose level", "Observation")
+  } else if (Index == 4) {
+        datasets <- list(data1 = "4 Dose level", data2 = "Observation")
+    trial_order <- c("4 Dose level", "Observation")
+  } 
+  
+   PFS_conc_list <- lapply(names(datasets), function(df_name) {
+    df <- get(df_name)
+    safe_select_and_mutate(df, input_variable, datasets[[df_name]])
+  })
+  
+    # Remove NULL elements (in case of errors in safe_select_and_mutate)
+  PFS_conc_list <- PFS_conc_list[!sapply(PFS_conc_list, is.null)]
+  
+  # Combine all dataframes into one
+  PFS_conc_df <- do.call(rbind, PFS_conc_list)
+  
+  colors_Q2 <-  c("red", "darkgreen", "turquoise3", "blue2") 
+  PFS_conc_df[[conc_IDQ]] <- factor(PFS_conc_df[[conc_IDQ]], 
+                                    levels = 1:4, 
+                                    labels = c("Q1", "Q2", "Q3", "Q4"))
+    # Set the desired order for the x-axis
+
+  PFS_conc_df$Trial <- factor(PFS_conc_df$Trial, levels = trial_order)
+  
+  # Calculate median for each trial and quantile
+  median_values <- PFS_conc_df %>%
+    group_by(Trial, !!sym(conc_IDQ)) %>%
+    summarise(median = median(!!sym(conc), na.rm = TRUE), .groups = "drop")
+  
+   # Create the plot
+  PFS_conc_plot <- ggplot(PFS_conc_df, aes(x = Trial, y = !!sym(conc), fill = !!sym(conc_IDQ))) +
+    #geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), position = position_dodge(width = 0.7)) +
+    geom_boxplot(draw_quantiles = c(0.25, 0.5, 0.75), position = position_dodge(width = 0)) +
+    scale_fill_manual(values = colors_Q2) +
+    custom_theme +
+     theme(plot.title = element_text(size = 8, face = "bold", hjust = 0.5),  # Larger, bold, centered title
+          axis.title = element_text(size = 8),  # Larger, bold axis titles
+          axis.text.x = element_text(size = 8,angle=0),
+          axis.text.y = element_text(size = 8),
+          axis.ticks = element_blank(),
+          legend.position = "none") +  
+    labs(title = paste("Exposure metric comparison - Using", conc), 
+         x = NULL,  
+         y = paste(conc, "quantiled distribution")) +
+    scale_x_discrete(limits = trial_order) +  # Use the defined order
+    geom_text(data = median_values, 
+              aes(x = Trial, 
+                  y = median, 
+                  label = sprintf("%.1f", median),
+                  group = !!sym(conc_IDQ)),
+              position = position_dodge(width = 0),
+              hjust = 0, 
+              vjust = -0.7, 
+              size = 2) +
+    scale_y_log10(labels = custom_log_labels)+
+    coord_flip()
+  
+  return(PFS_conc_plot)
+}
+
+CoxPH_res <- function(metric, data_true, data_4level) {
+
+    if (Index == 1) {
+    data_source <- c("True ER", "4 dose level")
+    } else if (Index == 2) {
+    data_source <- c("True ER", "Observation")
+   } else if (Index == 3) {
+    data_source <- c("4 dose level", "Observation")
+   } else if (Index == 4) {
+    data_source <- c("4 dose level", "Observation")
+   } 
+  
+     # Cox regression
+    Cox.true <- coxph(as.formula(paste("Surv(DAY, EVENT) ~", metric)), data = data_true)
+    Cox.4dose <- coxph(as.formula(paste("Surv(DAY, EVENT) ~", metric)), data = data_4level)
+    
+    univ_true <- summary(Cox.true)
+    P_true <- signif(univ_true$wald["pvalue"], digits = 3)
+    beta_true <- signif(univ_true$coef[1], digits = 3)
+    HR_true <- signif(exp(univ_true$coef[1]), digits = 3)
+    HR.confint.lower_true <- signif(univ_true$conf.int[,"lower .95"], 3)
+    HR.confint.upper_true <- signif(univ_true$conf.int[,"upper .95"], 3)
+    HR_true <- paste0(HR_true, " (", HR.confint.lower_true, "-", HR.confint.upper_true, ")")
+    
+    univ_4dose <- summary(Cox.4dose)
+    P_4dose <- signif(univ_4dose$wald["pvalue"], digits = 3)
+    beta_4dose <- signif(univ_4dose$coef[1], digits = 3)
+    HR_4dose <- signif(exp(univ_4dose$coef[1]), digits = 3)
+    HR.confint.lower_4dose <- signif(univ_4dose$conf.int[,"lower .95"], 3)
+    HR.confint.upper_4dose <- signif(univ_4dose$conf.int[,"upper .95"], 3)
+    HR_4dose <- paste0(HR_4dose, " (", HR.confint.lower_4dose, "-", HR.confint.upper_4dose, ")")
+    
+    res <- data.frame(
+      Source = data_source,
+      beta = c(beta_true, beta_4dose),
+      `HR (95% CI)` = c(HR_true, HR_4dose),
+      P.Value = c(P_true, P_4dose)
+    )
+    
+   return(res)
+}
+
+ 
+ # Create a custom theme for the table
+  
+  KM_plot_combined <- function(strata_var, km_object1,km_object2,  data_true, data_4level) {
+    colors_Q2 <- c("red", "darkgreen", "turquoise3", "blue2")
+    colors_Q1 <- c("red", "darkgreen", "turquoise3", "blue2")
+    
+  if (Index == 1) {
+   legend.labels_Q1 <- c("4D_Q1", "4D_Q2", "4D_Q3", "4D_Q4")
+    legend.labels_Q2 <- c("T_Q1", "T_Q2", "T_Q3", "T_Q4")
+    title_label = paste("Comparison of True with 4-dose level-", strata_var)
+} else if (Index == 2) {
+   legend.labels_Q1 <- c("O_Q1", "O_Q2", "O_Q3", "O_Q4")
+   legend.labels_Q2 <- c("T_Q1", "T_Q2", "T_Q3", "T_Q4")
+   title_label = paste("Comparison of True with Observation-", strata_var)
+} else if (Index == 3) {
+  legend.labels_Q1 <- c("O_Q1", "O_Q2", "O_Q3", "O_Q4")
+  legend.labels_Q2 <- c("4D_Q1", "4D_Q2", "4D_Q3", "4D_Q4")
+   title_label = paste("Comparison of 4-dose level with Observation-", strata_var)
+} else if (Index == 4) {
+  colors_Q2 <- c("grey65", "red", "darkgreen", "turquoise3", "blue2")
+  colors_Q1 <- c("grey65", "red", "darkgreen", "turquoise3", "blue2")
+    
+  legend.labels_Q1 <- c("Control","O_Q1", "O_Q2", "O_Q3", "O_Q4")
+  legend.labels_Q2 <- c("Control", "4D_Q1","4D_Q2", "4D_Q3", "4D_Q4")
+   title_label = paste("Comparison of 4-dose level with Observation-", strata_var)
+} 
+    combined_colors <- c(colors_Q1, colors_Q2)
+   combined_labels <- c(legend.labels_Q1, legend.labels_Q2)
+  # Create the first plot for true ER
+  plot1 <- ggsurvplot(
+    km_object1,
+    data = data_true,
+    surv.median.line = "hv",
+    palette = colors_Q2,
+    legend.labs = legend.labels_Q1,
+    xlim = c(0, 600),
+    linetype = "solid"
+  )
+
+  # # Create the second plot for the four dose level
+  plot2 <- ggsurvplot(
+    km_object2,
+    data = data_4level,
+    conf.int = TRUE,
+    palette = colors_Q1,
+    legend.labs = legend.labels_Q1,
+    legend.title = "",
+    xlim = c(0, 600),
+    linetype = "dashed"
+  )
+
+  combined_plot <- plot2$plot +
+    geom_step(data = plot1$data.survplot,
+              aes(x = time, y = surv, color = strata),
+              linetype = "solid") +
+    labs(
+      y = "Probability of No Event",
+      x = "Days",
+      title = title_label
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 10, face = "bold"),
+      axis.text = element_text(size = 8),
+      legend.position = "right",
+      legend.box = "vertical",
+      legend.title = element_text(size = 6, face = "bold"),
+      legend.text = element_text(size = 6),
+      legend.key.size = unit(0.5, "lines"),  # Reduce the size of legend keys
+      legend.spacing.y = unit(0.1, "cm"),    # Reduce vertical spacing between legend items
+      legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "cm") 
+    ) +
+    scale_x_continuous(breaks = seq(0, 600, by = 50)) +
+    scale_color_manual(values = combined_colors, labels = combined_labels) +
+    guides(color = guide_legend(override.aes = list(linetype = c(rep("dashed", length(legend.labels_Q1)), rep("solid", length(legend.labels_Q2))))))
+
+  return(combined_plot)
+}
+
+```
+
+##1.2 common function to handle the dataset
+```{r}
+ # calculate the percentage of patients reaching to steady state
+     
+     P_SS <- function(analysis, df_exp, numerator, denominator) {
+      # Calculate first day with proportion >= 0.95
+      FD <- df_exp %>%
+        mutate(PROP = .[[numerator]] / .[[denominator]]) %>%
+        filter(PROP >= 0.95) %>%
+        group_by(ID) %>%
+        summarise(First_Day = if (numerator == "CavgTE") {
+                        min(DAY[DAY > 2 * DI], na.rm = TRUE)  # Assume DI is defined in df_exp, avoiding the initial spike
+                     } else {
+                        min(DAY, na.rm = TRUE)
+                     }) %>%
+        ungroup() 
+  
+       # Join and calculate the summary statistics
+        EventDATA <- analysis %>%
+                select(SUBJID, ID, DAY) %>%
+                left_join(FD, by = "ID") %>%
+                mutate(SS = 1) %>%
+                select(-DAY)%>%
+                rename(DAY=First_Day)%>%
+                arrange(DAY)
+        
+        Utime <- unique(EventDATA$DAY)
+        
+        ni <- sapply(Utime, function(t) sum(EventDATA$DAY >= t))
+        di <- sapply(Utime, function(t) sum(EventDATA$DAY == t & EventDATA$SS == 1))
+        Event_probs <- 1-cumprod(1-di/ni)
+        
+        result <- data.frame(DAY = Utime, PNSS = Event_probs*100)
+        
+        if (max(result$DAY) < 600) {
+            result <- rbind(result, data.frame(DAY = 600, PNSS = 100))
+            }
+
+      return(result)
+    }
+
+
+  ## get the percentage of patients reach to SS based on the 20% and 50% of event happened 
+  
+      PofP_SS <- function(DAY_0.2E, DAY_medianE, comparison_data) {
+  # Perform a left join based on the 'DAY' column
+    patient_SS <- data.frame(
+            P = c(20, 50), 
+            DAY = c(DAY_0.2E, DAY_medianE)
+            )
+      
+    result <- patient_SS %>%
+    left_join(comparison_data, by = "DAY") %>%
+    mutate(PNSS = ifelse(is.na(PNSS),
+                         sapply(DAY, function(x) {
+                           max(comparison_data$PNSS[comparison_data$DAY < x], na.rm = TRUE)
+                         }),
+                         PNSS)) %>%
+    mutate(PNSS = ifelse(PNSS == -Inf, 0, PNSS),
+           Day_perc = sprintf("%d (%.1f%%)", DAY, PNSS))
+    
+          return(result)
+    }
+    
+
+## split the dataset into 4 groups
+quantiles <- function(data, column_name, labels = c("1", "2", "3", "4")) {
+  quantiles <- quantile(data[[column_name]], probs = c(0.25, 0.5, 0.75))
+  categorized_column <- cut(data[[column_name]], 
+                            breaks = c(-Inf, quantiles, Inf), 
+                            labels = labels, 
+                            include.lowest = TRUE)
+  return(categorized_column)
+
+}
+
+## split the dataset into 3 groups
+tertile <- function(data, column_name, labels = c("1", "2", "3")) {
+  # Calculate the tertiles
+  tertiles <- quantile(data[[column_name]], probs = c(1/3, 2/3))
+  
+  # Categorize the column based on the tertiles
+  categorized_column <- cut(data[[column_name]], 
+                            breaks = c(-Inf, tertiles, Inf), 
+                            labels = labels, 
+                            include.lowest = TRUE)
+  return(categorized_column)
+}
+
+### perfrom the Mann-Whitney U-Test and save the result
+
+wilcox <- function(df_group1, df_group2, variables) {
+  # Initialize an empty data frame to store results
+  results_df <- data.frame(p_value = numeric(), stringsAsFactors = FALSE)
+  
+  for (var in variables) {
+    # Run the Wilcoxon test for the current variable
+    test_result <- wilcox.test(df_group1[[var]], df_group2[[var]], paired = FALSE, alternative = "two.sided",
+                               conf.int = TRUE, conf.level=0.95) # Note: corrected "confi.level" to "conf.level"
+    
+    # Append the variable name and p-value to the results dataframe
+     temp_result <- data.frame(P.Value = test_result$p.value, stringsAsFactors = FALSE)
+     rownames(temp_result) <- var
+     
+     results_df <- rbind(results_df, temp_result)
+  }
+  return(results_df)
+}
+
+### extract results from univariate Cox PH models_continuous
+
+univ_con <- function(univ_models) {
+    univ_results <- lapply(univ_models, function(x) {
+    x <- summary(x)  # Summarize the model
+    # Extract and format the results
+    P.value <- signif(x$wald["pvalue"], digits=3)
+    wald.test <- signif(x$wald["test"], digits=3)
+    beta <- signif(x$coef[1], digits=3)  # Coefficient beta
+    HR <- signif(exp(x$coef[1]), digits=3)  # Hazard Ratio (HR)
+    HR.confint.lower <- signif(x$conf.int[,"lower .95"], 3)
+    HR.confint.upper <- signif(x$conf.int[,"upper .95"], 3)
+    HR <- paste0(HR, " (",
+                 HR.confint.lower, "-", HR.confint.upper, ")")
+    res <- c(beta, HR, wald.test, P.value)
+    names(res) <- c("beta", "HR (95% CI for HR)", "wald.test", "P.Value")
+    return(res)
+  })
+  # Convert the list of results to a dataframe
+  result_df <- t(as.data.frame(univ_results))
+  return(result_df)
+}
+
+### extract results from univariate Cox PH models_categorical_4 GROUP
+univ_cat <- function(univ_models_G) {
+  
+          univ_results_G <- lapply(univ_models_G, function(x) { 
+          x <- summary(x)
+
+          # Extract Wald test p-value and statistic
+          P.value<-signif(x$wald["pvalue"], digits=2)
+          wald.test<-signif(x$wald["test"], digits=2)
+          beta <- numeric(length = 3)
+          HR <- numeric(length = 3)
+          HR.confint.lower <- numeric(length = 3)
+          HR.confint.upper <- numeric(length = 3)
+          HRs <- character(length = 3)
+  
+          for (i in 1:3) {
+            beta[i] <- signif(x$coef[i], digits = 3)
+            HR[i] <- signif(exp(x$coef[i]), digits = 3) # HR
+            HR.confint.lower[i] <- signif(x$conf.int[i,3],3)
+            HR.confint.upper[i] <- signif(x$conf.int[i,4],3)
+            HRs[i] <- paste0(HR[i], " (", HR.confint.lower[i], "-", HR.confint.upper[i], ")")
+            }
+           res <- c(beta, HRs, wald.test, P.value )
+           names(res) <- c(paste0("Beta", 1:3), paste0("HR (95% CI) ", 1:3), "Wald.Test", "P.Value")
+   
+           return(res)
+
+          })
+          # Convert the list of results to a dataframe
+          result_df <- t(as.data.frame(univ_results_G))
+          return(result_df)
+}  
+
+## extract results from univariate Cox PH models_categorical_3 GROUP
+
+univ_cat_T <- function(univ_models_G) {
+  
+          univ_results_G <- lapply(univ_models_G, function(x) { 
+          x <- summary(x)
+
+          # Extract Wald test p-value and statistic
+          P.value<-signif(x$wald["pvalue"], digits=2)
+          wald.test<-signif(x$wald["test"], digits=2)
+          beta <- numeric(length = 2)
+          HR <- numeric(length = 2)
+          HR.confint.lower <- numeric(length = 2)
+          HR.confint.upper <- numeric(length = 2)
+          HRs <- character(length = 2)
+  
+          for (i in 1:2) {
+            beta[i] <- signif(x$coef[i], digits = 3)
+            HR[i] <- signif(exp(x$coef[i]), digits = 3) # HR
+            HR.confint.lower[i] <- signif(x$conf.int[i,3],3)
+            HR.confint.upper[i] <- signif(x$conf.int[i,4],3)
+            HRs[i] <- paste0(HR[i], " (", HR.confint.lower[i], "-", HR.confint.upper[i], ")")
+            }
+           res <- c(beta, HRs, wald.test, P.value )
+           names(res) <- c(paste0("Beta", 1:2), paste0("HR (95% CI) ", 1:2), "Wald.Test", "P.Value")
+   
+           return(res)
+
+          })
+          # Convert the list of results to a dataframe
+          result_df <- t(as.data.frame(univ_results_G))
+          return(result_df)
+}  
+
+# uni <- coxph(Surv(DAY, EVENT) ~ CtroughQ, data = df.ER)
+# summary<- summary(uni)
+# summary$conf.int
+
+# extract results from univariate Cox PH models_continuous
+logistic_analysis <- function(logistic_Results, covariates) {
+  logistic_summaries <- lapply(logistic_Results, summary)
+  
+  logistic.results <- lapply(logistic_summaries, function(x) {
+    P.value <- signif(x$coefficients[2, 4], digits=3)
+    Slope <- signif(x$coefficients[2, 1], digits=3)
+    AIC <- signif(x$aic, digits=3)  # Corrected line
+    res <- c(Slope, AIC, P.value)
+    names(res) <- c("Slope","AIC", "P.Value")
+    return(res)
+  })
+  
+  # Convert the list of results to a dataframe
+  result_df <- as.data.frame(do.call(rbind, logistic.results))
+  row.names(result_df) <- covariates  # Add row names
+  
+  return(result_df)
+}
+```
+
+# 2 Tumor natural growth profiles
+
+Model:"PD_tumor_Linear.mod"
+- dT/dt=Kgrow - Kdecay*T
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis")
+
+mod.TS<- mread_cache("PD_tumor_Linear.mod") 
+
+idata <- expand.idata(ID = seq(1000))
+
+set.seed(12345)
+out.TG <- mrgsim(
+  mod.TS,
+  idata = idata,
+  recsort = 3, # Sort records by time in ascending order only
+  tgrid = seq(0, 14400, by = 2)
+)
+
+out_df_TG <- as.data.frame(out.TG)
+
+df_TG <- out_df_TG %>%
+          filter(time %% 24 == 0)%>%
+          mutate(DAY = ceiling(time/24),
+                 LAST=0)%>%
+          rename(TumorB=Tumor_0,
+                 Kgrow=KG,
+                 Kdecay=KD)
+
+Baseline <- df_TG%>%
+            filter(time == 0)%>%
+            select(ID,TumorB,Kgrow,Kdecay)
+
+PFS.natural <- df_TG %>%
+             mutate( PFS = if_else(Tumor < 1.2 * TumorB, 0, 1))%>%
+             filter(PFS==1)%>%
+             group_by(ID) %>%
+             slice_min(order_by = DAY, n = 1) %>%
+             ungroup()%>%
+             select(ID,DAY)
+
+ids <- c(1:1000)
+random_seed <- 112
+set.seed(random_seed)
+selected_ids <- sample(ids, 12) %>% sort()
+
+PFS.time_N <- PFS.natural %>% filter(ID %in% selected_ids)
+
+Tumor.plot <- df_TG %>%
+  filter(ID %in% selected_ids) %>%
+  ggplot(aes(x = DAY, y = Tumor, group = ID), color = "black") +
+  geom_line( size=1.5) +
+  geom_line(aes(x = DAY, y = TumorB*1.2, group = ID), linetype = "dashed", color = "red", size=0.5) +
+  geom_line(aes(x = DAY, y = TumorB*0.7, group = ID), linetype = "dashed", color = "navyblue", size=0.5) +
+  theme_classic() +
+  geom_vline(data = PFS.time_N, aes(xintercept = DAY), color = "red") +
+  geom_text(data = PFS.time_N, aes(x = DAY, y = 100, label = DAY), 
+            vjust = 1.2, hjust = 0, size = 2.5, angle = 90, color = "red", fontface = "bold") + 
+  facet_wrap(~ID, ncol = 3, scales = "free") +  
+  theme(
+    panel.background = element_rect(fill = "white", color = "black"),
+    panel.grid.major.y = element_line(color = "grey"),
+    panel.grid.minor.x = element_line(color = "grey", linetype = 2),
+    panel.grid.major.x = element_line(color = "grey"),
+    legend.background = element_rect(fill = "transparent"),
+    axis.text.x = element_text(size = 6,angle=60),
+    axis.text.y = element_text(size = 6),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  labs(
+    x = "Time (Days)",
+    y = "Tumor size(mm)",
+    title = "Typical Tumor Natural Growth Profiles",
+    color = "ID"
+  )
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Typical TG plot.tiff",
+        plot = Tumor.plot,
+        width = 6, height = 7, dpi = 300, units = "in")
+
+df.ORR <-df_TG %>%
+         mutate(EVENT = if_else(Tumor < 0.7 * TumorB, 1, 0)) %>%
+         group_by(ID)%>%
+          # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+        # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((EVENT == 0 & DAY < first_event_day) | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)%>%
+         filter(LAST==1)
+
+KM_TG_ORR <- survfit(Surv(DAY, EVENT) ~ 1,  data = df.ORR)
+
+plot_TG_ORR<- KM_plot(KM_TG_ORR, df.ORR, "Tumor natural growth_ORR", 600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_TG_ORR.tiff")
+plot_TG_ORR
+
+ROD_natural_linear <-  df_TG %>%
+                      mutate( ORR = if_else(Tumor < 0.7 * TumorB, 1, 0))%>%
+                      filter(ORR==1)%>%
+                      group_by(ID) %>%
+                      summarize(First_Response_Day = min(DAY),
+                                Last_Response_Day = max(DAY)) %>%
+                      filter(!is.infinite(First_Response_Day))%>%
+                      mutate(DAY=Last_Response_Day-First_Response_Day,
+                             EVENT=1)
+
+# KM_TG_DOR <- survfit(Surv(DAY, EVENT) ~ 1,  data = ROD_natural_linear)
+# 
+# plot_TG_DOR<- KM_plot(KM_TG_ORR, ROD_natural_linear, "Tumor natural growth_DOR", 600,
+#        "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_TG_DOR.tiff")
+# plot_TG_DOR
+
+df.PFS<- df_TG %>%
+         mutate(EVENT = if_else(Tumor < 1.2 * TumorB, 0, 1)) %>%
+         group_by(ID) %>%
+  # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+  # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter(EVENT == 0 | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         filter(LAST==1)%>%
+         select(-first_event_day,-last_day)
+
+# ##plotting the results
+# 
+# KM_TG_PFS <- survfit(Surv(DAY, EVENT) ~ 1,  data = df.PFS)
+# 
+# plot.PFS<- KM_plot(KM_TG_PFS, df.PFS, "Tumor natural growth_PFS", 600,
+#        "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_TG_PFS.tiff")
+# plot.PFS
+# 
+# 
+# df.PFS$TumorB_IDQ  <- quantiles( df.PFS, "TumorB")
+# df.PFS$Kgrow_IDQ <- quantiles( df.PFS, "Kgrow")
+# df.PFS$Kdecay_IDQ <- quantiles( df.PFS, "Kdecay")
+# 
+# legend.labels_Q <-c("Q1: 0-0.25", "Q2: 0.25-0.5", "Q3: 0.5-0.75", "Q4: 0.75-1")
+# colors_Q <-c("red", "limegreen", "turquoise3", "blue2")
+# 
+# KM_TumorB <- survfit(Surv(DAY, EVENT) ~ TumorB_IDQ,  data = df.PFS)
+# 
+# plot.TumorB.PFS <- KM_plot_Q(KM_TumorB, df.PFS,"Tumor Baseline_PFS",  legend.labels_Q, colors_Q, 600,
+#        "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_TG_PFS_TumorBQ.tiff")
+# plot.TumorB.PFS 
+# 
+# KM_KGROW <- survfit(Surv(DAY, EVENT) ~ Kgrow_IDQ,  data = df.PFS)
+# 
+# plot.KGROW.PFS <- KM_plot_Q(KM_KGROW, df.PFS,"Tumor growth rate _PFS",legend.labels_Q, colors_Q,600,
+#        "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_TG_PFS_KGROWQ.tiff")
+# plot.KGROW.PFS
+# 
+# KM_Kdecay <- survfit(Surv(DAY, EVENT) ~ Kdecay_IDQ,  data = df.PFS)
+#  
+# plot.Kdecay.PFS <- KM_plot_Q(KM_Kdecay, df.PFS,"Tumor natural shrink rate _PFS",legend.labels_Q, colors_Q,600,
+#         "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_TG_PFS_KdecayQ.tiff")
+# plot.Kdecay.PFS
+
+# # Generate the control group database for the PFS
+# TTE_NOTreatment <- df.PFS %>% mutate(DOSE=0)%>% select(ID, DAY, DOSE, EVENT)
+# TTE_PD_NOTreatment <- left_join(TTE_NOTreatment, Baseline, by = c("ID"))
+# df.ER.IDQ.PFS.NOTreatment <- TTE_PD_NOTreatment %>%
+#                              mutate(Ctrough1D=0,CtroughOED=0,Cavg1D=0,CavgSS=0,CavgOED=0,Cavg1WOED=0,Cavg2WC1=0, Cavg2WSS=0,Cavg2WOED=0,
+#                                     Cavg2WC1OED=0,Cavg4WC1=0,Cavg4WSS=0,Cavg4WC1OED=0, CavgTE=0,CavgTE2WC1=0,CavgTE4WC1=0,
+#                                     Ctrough1D_IDQ=0,CtroughOED_IDQ=0,Cavg1D_IDQ=0,CavgSS_IDQ=0,CavgOED_IDQ=0,Cavg1WOED_IDQ=0,
+#                                     Cavg2WC1_IDQ=0, Cavg2WSS_IDQ=0,Cavg2WOED_IDQ=0,Cavg2WC1OED_IDQ=0,Cavg4WC1_IDQ=0,
+#                                     Cavg4WSS_IDQ=0,Cavg4WC1OED_IDQ=0, CavgTE_IDQ=0,CavgTE2WC1_IDQ=0,CavgTE4WC1_IDQ=0)
+#                             
+# setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis")
+# write.csv(df.ER.IDQ.PFS.NOTreatment, "df_ER_IDQ_PFS_NOTreatment.csv", row.names = FALSE)
+```
+#3 Tumor growth profiles with treatment effect
+
+NOTE: 
+Cavg: daily average concentration
+Cavg1WC1: the average concentration in the first doing cycle(1w) equals to conc at the end of the first dosing cycle.
+CavgTE2WC1:similar to the Cavg1WC1, the dosing cycle is 2W.
+```{r}
+ids <- c(1:1000)
+random_seed <- 112
+set.seed(random_seed)
+selected_ids <- sample(ids, 12) %>% sort()
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis")
+
+DI = 1 # dose interval: DAY
+Case.fix <- 2  
+doseamt <- 0.001
+
+# random bootstrap the SUBJID with a fixed seed
+parameter <- read.csv("estimated individual PK parameters.csv")
+ID.unique <- unique(parameter$SUBJID) 
+id.seed = 20817
+set.seed(id.seed)
+ID.bootstrap <- sample(ID.unique, 1000, replace = TRUE)
+
+iparameter <- data.frame()
+
+for (i in 1:length(ID.bootstrap)) {
+  id <- ID.bootstrap[i]
+  rows_for_id <- parameter[parameter$SUBJID == id, ]
+  rows_for_id$NEWID <- i
+  iparameter<- bind_rows(iparameter, rows_for_id)
+}
+
+iparameter <- iparameter %>% rename(ID=NEWID)
+
+iparameter.allID <- iparameter%>%
+                     mutate(KA=KA*20,
+                     CL=CL*5)   
+
+# random solected doing records based on ID
+iparameter.allID <- iparameter.allID %>%
+                     select(-D2,-ALAG1,-CL)
+    
+# mrgsolve model
+PKPD_model<- mread_cache("PKPD_tumor_1DOSEL.mod") 
+
+idata.PKPD <- left_join(iparameter.allID, Baseline, by = c("ID"))
+ID.MAX <-max(iparameter.allID$ID)
+evnt <- ev(amt=doseamt,ii= DI*24,addl=599, ID=1:ID.MAX)
+
+set.seed(20817)
+out.pkpd<- PKPD_model%>%
+  idata_set(idata.PKPD) %>%
+  ev(evnt)%>%
+  mrgsim(recover = c("HD","CREAT","SUBJID"), 
+              carry.out = "EVID", 
+              recsort = 3,
+ #             atol = 1e-12, 
+  #            rtol = 1e-10,
+              tgrid = seq(0, 14400, by = 1))
+
+out_df <- as.data.frame(out.pkpd)
+#summary(out_df)
+
+# calculate the exposure metrics
+exp <- out_df %>% 
+  filter(EVID == 0) %>%
+  select(-EVID,-GUT,-CENT,-PERIPH)%>%
+  mutate(DAY = ceiling(time/24),
+         CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+         AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+  filter(time > 0)%>%
+  mutate(CavgTE = AUC/time)%>%  # average concentration time to event
+  group_by(ID, DAY) %>%
+  mutate(Cmax = max(CP),
+         Ctrough = tail(CP,1)) %>%
+  ungroup() 
+  
+ #used to plot the first dosing interval profile
+exp.1.hour<- exp %>%
+          mutate(DOSE = doseamt)%>%
+          rename(TumorB= Tumor_0,
+                 AUCTE=AUC,
+                 Kgrow=KG,
+                 kdecay=KD)%>%
+          select(ID,SUBJID,DAY,time,DOSE,CL,TumorB, Kgrow, kdecay, EMAX, EC50, Ktol, Tumor, CP,Cmax,Ctrough,AUCTE,CavgTE)
+
+# used to conduct ER analysis 
+exp.1<- exp.1.hour%>%
+        filter(time %% 24 == 0)
+
+AUC1D <- exp.1 %>%
+  group_by(ID) %>%
+  # Calculate the last AUCTE for each day for each ID
+  group_by(DAY, .add = TRUE) %>%
+  summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+  # Calculate daily AUC for each ID
+  group_by(ID) %>%
+  mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+  ungroup()%>%
+  select(-LastAUCTE)%>%
+  mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+Combined.data <- left_join(exp.1, AUC1D, by = c("ID", "DAY"))
+
+# calculate all possible necessary exposure matrix
+exp.2 <- Combined.data%>%
+  group_by(ID) %>%
+  mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+         AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+         AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+         AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+         Cavg = AUC1D / 24,
+         Cavg1W = AUC1W / (24*7),
+         Cavg2W = AUC2W / (24*14),
+         Cavg3W = AUC3W / (24*21),
+         Cavg4W = AUC4W / (24*28)) %>%
+  ungroup()%>%
+  select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W)%>%
+  mutate(Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+         Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+         Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+         Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))
+
+df.exp <- exp.2 %>%
+          group_by(ID) %>%
+          mutate(
+                Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28]),
+                CavgTE2WC1 = if_else(DAY > 14, CavgTE, Cavg2W[DAY == 14]),
+                CavgTE4WC1 = if_else(DAY > 28, CavgTE, Cavg4W[DAY == 28]),
+                CavgSS = max(tail(Cavg, n = min(100, length(Cavg)))),
+                Cavg1WSS = max(tail(Cavg1W, n = min(100, length(Cavg1W)))),
+                Cavg2WSS = max(tail(Cavg2W, n = min(100, length(Cavg2W)))),
+                Cavg4WSS = max(tail(Cavg4W, n = min(100, length(Cavg4W)))),
+                CavgTESS = max(tail(CavgTE, n = min(100, length(CavgTE))))
+                ) %>%
+          ungroup()
+
+ORR_duration <- out_df %>%
+                filter(time%%24==0)%>%
+                mutate(Day= time/24)%>%
+                mutate( ORR = if_else(Tumor < 0.7 * (Tumor_0), 1, 0))%>%
+                filter(ORR==1)%>%
+                group_by(ID) %>%
+                summarize(
+                         First_Response_Day = min(Day),
+                         Last_Response_Day = max(Day)
+                         ) %>%
+                filter(!is.infinite(First_Response_Day))%>%
+                mutate(duration=Last_Response_Day-First_Response_Day)
+
+PFS.time <- out_df %>%
+             filter(time%%24==0)%>%
+             mutate(Day= time/24)%>%
+             mutate( PFS = if_else(Tumor < 1.2 * (Tumor_0), 0, 1))%>%
+             filter(PFS==1)%>%
+             group_by(ID) %>%
+             slice_min(order_by = Day, n = 1) %>%
+             ungroup()%>%
+             select(ID,Day)
+
+ORR_duration_T <- ORR_duration %>% filter(ID %in% selected_ids)
+PFS.time_T <- PFS.time %>% filter(ID %in% selected_ids)
+
+# TG_Tumor_dose_plots <- lapply(selected_ids, Tumor_Dose_plot, data = df.exp, response_duration = ORR_duration_T, pfs_linear = PFS.time_T)
+# combined_Tumor_dose_plot <- wrap_plots(TG_Tumor_dose_plots, ncol = 3)
+# 
+# ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Typical Tumor dose plot.tiff",
+#         plot = combined_Tumor_dose_plot, 
+#         width = 12, height = 10, dpi = 400, units = "in")
+
+# TG_PKPD_profile_plots <- lapply(selected_ids, PKPD_profile_plot, data = df.exp, response_duration = ORR_duration_T, pfs_linear = PFS.time_T)
+# combined_PKPD_profile_plot <- wrap_plots(TG_PKPD_profile_plots, ncol = 3)
+# 
+# ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Typical PKPD profile plot.tiff",
+#         plot = combined_PKPD_profile_plot,
+#         width = 12, height = 10, dpi = 400, units = "in")
+
+# # draw the 12IDs' exposure metric profiles
+#    exp.12ID <- df.exp %>% 
+#              filter(ID %in% selected_ids)
+# 
+#     CP.plot <- Typical_plot_DH2(exp.12ID, "CP", "Typical CP Profiles")
+#     Cavg.plot <- Typical_plot_DH2(exp.12ID, "Cavg", "Typical Cavg Profiles")
+#     Cavg1W.plot <- Typical_plot_DH2(exp.12ID, "Cavg1W", "Typical Cavg1W Profiles")
+#     Cavg2W.plot <- Typical_plot_DH2(exp.12ID, "Cavg2W", "Typical Cavg2W Profiles")
+#     Cavg4W.plot <- Typical_plot_DH2(exp.12ID, "Cavg4W", "Typical Cavg4W Profiles")
+#     CavgTE.plot <- Typical_plot_DH2(exp.12ID, "CavgTE", "Typical CavgTE Profiles")
+# 
+#     COMBINE_TP <- grid.arrange(CP.plot, Cavg.plot, Cavg1W.plot,  Cavg2W.plot, Cavg4W.plot, CavgTE.plot, ncol = 3)
+# 
+#     ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Typical plots for exposure matrix.tiff",
+#         plot = COMBINE_TP, 
+#         width = 16, height = 6, dpi = 400, units = "in")
+#     
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+saveRDS(df.exp, file = "df_exp.rds")
+```
+
+
+#4 Generate the exposure event dataset
+
+##4.1 prepare the df.exp and df.ER.IDQ dataset
+
+Based on Percentage Increase in Tumor Size Relative to Baseline
+- Have an Event if Tumor size increase > 20% (PFS)
+- otherwise, censored the data
+```{r}
+# df.exp <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/df_exp.rds")
+
+df.ER <- df.exp %>%
+        mutate( event = if_else(Tumor < 1.2 * TumorB, 0, 1),
+                LAST=0) %>%
+        group_by(ID) %>%
+  # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(event == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+  # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((event == 0 & DAY < first_event_day) | (event == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | event == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)%>%
+         rename(EVENT=event)
+
+analysis <- df.ER %>%
+            filter(LAST == 1)
+
+# first day exposure
+df.ER.ID <- df.ER %>%
+            filter(DAY == 1) %>%
+            select(ID,DOSE,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID <-  analysis[,c("ID","DAY","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg2WC1","Cavg4WC1","CavgTE",     "CavgTE2WC1","CavgTE4WC1","CavgSS","Cavg2WSS","Cavg4WSS","EVENT")]%>%
+         rename(CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ <- merge(df.ER.ID, G.ID, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgSS,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WSS,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WSS,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+#summary(df.ER.IDQ)
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+write.csv(df.ER.IDQ, "df_ER_IDQ.csv", row.names = FALSE)
+```
+
+
+```{r}
+KM_nOstrata_PFS <- survfit(Surv(DAY, EVENT) ~ 1,  data = analysis)
+
+plot1_PFS<- KM_plot(KM_nOstrata_PFS, analysis, "PFS with treatment", 600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PKPD model_PFS.tiff")
+plot1_PFS
+
+#generate the PFS summary workbook
+row_names <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")
+
+PK_summary <- analysis %>%
+              select(ID, DAY,  DOSE,  CL, CP, Cmax, CavgSS, Ctrough, Cavg,Cavg1W,Cavg2W,CavgTE, TumorB, EMAX, EC50, Kgrow, kdecay, Ktol,EVENT)%>%
+              summarise(across(everything(), ~ summary(.x)))
+rownames(PK_summary) <- row_names
+PK_summary <- PK_summary %>% rownames_to_column(var = "Statistic")%>%
+                mutate(across(c(Kgrow, kdecay, Ktol), ~ formatC(.x, format = "e", digits = 2)),
+                     across(-c(Statistic, Kgrow, kdecay, Ktol), ~ if(is.numeric(.)) {
+                          ifelse(. %% 1 == 0, as.integer(.), round(., 2))
+                     } else {
+                          .
+                     }))
+
+PFS.Event <-  analysis %>%
+                      select(ID, DAY,  DOSE,  CL, CP, Cmax, CavgSS, Ctrough, Cavg,Cavg1W,Cavg2W,CavgTE, TumorB, EMAX, EC50, Kgrow, kdecay, Ktol,EVENT)%>%
+                      filter(EVENT==1)
+PFS_summary_event  <- PFS.Event %>% summarise(across(everything(), ~ summary(.x)))
+rownames(PFS_summary_event) <- row_names
+PFS_summary_event <- PFS_summary_event %>% rownames_to_column(var = "Statistic")%>%
+                mutate(across(c(Kgrow, kdecay, Ktol), ~ formatC(.x, format = "e", digits = 2)),
+                     across(-c(Statistic, Kgrow, kdecay, Ktol), ~ if(is.numeric(.)) {
+                          ifelse(. %% 1 == 0, as.integer(.), round(., 2))
+                     } else {
+                          .
+                     }))
+
+PFS.noEvent <-  analysis %>%
+                      select(ID, DAY,  DOSE,  CL, CP, Cmax, CavgSS, Ctrough, Cavg,Cavg1W,Cavg2W,CavgTE, TumorB, EMAX, EC50, Kgrow, kdecay, Ktol,EVENT)%>%
+                      filter(EVENT!=1)
+
+PFS_summary_noEvent <- PFS.noEvent %>% summarise(across(everything(), ~ summary(.x)))
+rownames(PFS_summary_noEvent) <- row_names
+PFS_summary_noevent <- PFS_summary_noEvent %>% rownames_to_column(var = "Statistic")%>%
+                mutate(across(c(Kgrow, kdecay, Ktol), ~ formatC(.x, format = "e", digits = 2)),
+                     across(-c(Statistic, Kgrow, kdecay, Ktol), ~ if(is.numeric(.)) {
+                          ifelse(. %% 1 == 0, as.integer(.), round(., 2))
+                     } else {
+                          .
+                     }))
+
+wb_PFS <- createWorkbook()
+addWorksheet(wb_PFS, "PFS Summary")
+addWorksheet(wb_PFS, "PFS Summary_event")
+addWorksheet(wb_PFS, "PFS Summary_noevent")
+
+writeData(wb_PFS, sheet = "PFS Summary", x = PK_summary)
+writeData(wb_PFS, sheet = "PFS Summary_event", x = PFS_summary_event)
+writeData(wb_PFS, sheet = "PFS Summary_noevent", x = PFS_summary_noevent)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+saveWorkbook(wb_PFS, file = "PFS Summary.xlsx", overwrite = TRUE)
+
+#generate the typical Dose vs event for IDs having PFS
+PFS.12IDs <- sample(PFS.Event$ID, 12) %>% sort()
+
+ORR_duration_P <- ORR_duration %>% filter(ID %in%PFS.12IDs)
+PFS.time_P <- PFS.time %>% filter(ID %in% PFS.12IDs)
+
+## PD dose plots
+PFS_Tumor_dose_plots <- lapply(PFS.12IDs, Tumor_Dose_plot, data = df.exp, response_duration = ORR_duration_P, pfs_linear = PFS.time_P)
+PFS_combined_Tumor_dose_plot <- wrap_plots(PFS_Tumor_dose_plots, ncol = 3)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Typical Tumor dose plot_PFS.tiff",
+        plot = PFS_combined_Tumor_dose_plot,
+        width = 12, height = 10, dpi = 400, units = "in")
+
+## PD Vs PK plot
+PFS_PKPD_profile_plots <- lapply(PFS.12IDs, PKPD_profile_plot, data = df.exp, response_duration = ORR_duration_P, pfs_linear = PFS.time_P)
+PFS_combined_PKPD_profile_plot <- wrap_plots(PFS_PKPD_profile_plots, ncol = 3)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Typical PKPD profile plot_PFS.tiff",
+        plot = PFS_combined_PKPD_profile_plot,
+        width = 12, height = 10, dpi = 400, units = "in")
+```
+##4.2 Typical CP plot and event% vs PK% reaching to SS
+
+```{r}
+     # abstract the three IDs, having the higest, median, and lowest con
+  #==============using dose interval here==============================
+
+     Ctrough<- df.exp%>%
+               select(ID,DAY, Ctrough)%>%
+               filter(DAY == DI)
+     
+     Ctrough_95th <- quantile(Ctrough$Ctrough, 0.95, na.rm = TRUE)
+     Ctrough_5th <- quantile(Ctrough$Ctrough, 0.05, na.rm = TRUE)
+     median_Ctrough <- median(Ctrough$Ctrough)
+     top_95_ids <- Ctrough$ID[which.min(abs(Ctrough$Ctrough - Ctrough_95th))]
+     bottom_5_ids <- Ctrough$ID[which.min(abs(Ctrough$Ctrough - Ctrough_5th))]
+     median_id <- Ctrough$ID[which.min(abs(Ctrough$Ctrough - median_Ctrough))]
+     # Create a vector or a small data frame with these IDs
+     selected_ids <- data.frame(
+      # ID95 =  top_95_ids,
+      # ID5 = bottom_5_ids,
+       MedianID = median_id
+     )
+     
+     
+     #pick the ID with median conc to show the typical conc profile
+
+     day_limit  <- if (Case.fix == 1) {
+       DI * 5
+     } else if (Case.fix == 2) {
+       DI * 10
+     } else if (Case.fix == 3) {
+       600  
+     }
+
+     cp.df <- exp.1.hour %>%
+              filter(DAY <= day_limit, 
+              ID == median_id)
+     
+     CP.C1 <- cp.df%>%
+              filter(DAY <= DI) 
+
+     CP.plot <- CP_plot(cp.df, "Typical CP Profile")
+
+     ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/CP plots.tiff",
+             plot = CP.plot, 
+             width = 5, height = 3, dpi = 400, units = "in")
+
+     C1.plot <- CP_plot(CP.C1, "Typical CP Profile on the First Dosing Interval")
+
+     ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/CP plots on the first dose interval.tiff",
+             plot = C1.plot, 
+             width = 5, height = 3, dpi = 400, units = "in")
+     
+     
+     
+      # calculate the Cumulative Events%
+     EventDATA <- analysis %>%
+                  select(DAY, EVENT)%>%
+                  arrange(DAY)
+     Utime <- unique(EventDATA$DAY)
+     # Number at risk and number of events at each time
+     ni <- sapply(Utime, function(t) sum(EventDATA$DAY >= t))
+     di <- sapply(Utime, function(t) sum(EventDATA$DAY == t & EventDATA$EVENT == 1))
+     Event_probs <- 1-cumprod(1-di/ni)
+
+     CumEvent <- data.frame(DAY = Utime, PEvent = Event_probs*100)
+     
+     DAY_0.2E <-  CumEvent$DAY[which.min(abs(CumEvent$PEvent -20))]
+     
+     DAY_medianE <- ifelse(max(CumEvent$PEvent) < 50, NA_real_, CumEvent$DAY[which.min(abs(CumEvent$PEvent - 50))])
+     
+  # calculate the percentage of patients reaching to steady state   
+    p_Cavg <- P_SS(analysis, df.exp, "Cavg", "CavgSS")
+    p_Cavg1W <- P_SS(analysis, df.exp, "Cavg1W", "Cavg1WSS")
+    p_Cavg2W <- P_SS(analysis, df.exp, "Cavg2W", "Cavg2WSS")
+    p_Cavg4W <- P_SS(analysis, df.exp, "Cavg4W", "Cavg4WSS")
+    p_Cavg2WC1 <- P_SS(analysis, df.exp, "Cavg2WC1", "Cavg2WSS")
+    p_Cavg4WC1 <- P_SS(analysis, df.exp, "Cavg4WC1", "Cavg4WSS")
+    p_CavgTE <- P_SS(analysis, df.exp, "CavgTE", "CavgTESS")
+    
+   ## get the percentage of patients reach to SS based on the 20% and 50% of event happened 
+     Cavg_patient_SS <- PofP_SS(DAY_0.2E, DAY_medianE, p_Cavg)
+     Cavg1W_patient_SS <- PofP_SS(DAY_0.2E, DAY_medianE, p_Cavg1W)
+     Cavg2W_patient_SS <- PofP_SS(DAY_0.2E, DAY_medianE, p_Cavg2W)
+     Cavg4W_patient_SS <- PofP_SS(DAY_0.2E, DAY_medianE, p_Cavg4W)
+     Cavg2WC1_patient_SS <- PofP_SS(DAY_0.2E, DAY_medianE, p_Cavg2WC1)
+     Cavg4WC1_patient_SS <- PofP_SS(DAY_0.2E, DAY_medianE, p_Cavg4WC1)
+     CavgTE_patient_SS <- PofP_SS(DAY_0.2E, DAY_medianE, p_CavgTE)
+     
+     exp.S <- df.exp %>% 
+             filter(ID %in%selected_ids)
+  
+     Cavg.plot <- Typical_plot(exp.S, "Cavg", "Typical daily Cavg Profiles",Cavg_patient_SS,CumEvent,p_Cavg)
+     Cavg1W.plot <- Typical_plot(exp.S, "Cavg1W", "Typical Cavg1W Profiles",Cavg1W_patient_SS,CumEvent,p_Cavg1W)
+     Cavg4W.plot <- Typical_plot(exp.S, "Cavg4W", "Typical Cavg4W Profiles",Cavg4W_patient_SS,CumEvent,p_Cavg4W)
+     CavgTE.plot <- Typical_plot(exp.S, "CavgTE", "Typical CavgTE Profiles",CavgTE_patient_SS,CumEvent,p_CavgTE)
+
+     COMBINE_24 <- grid.arrange(Cavg.plot, Cavg1W.plot,  Cavg4W.plot, CavgTE.plot, ncol = 2)
+     ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Typical plots for exposure matrix_20.tiff",
+        plot = COMBINE_24, 
+        width = 8, height = 6, dpi = 400, units = "in")
+
+```
+
+#5 Conventional ER analysis 
+
+NOTE: 
+Cavg: daily average concentration; Cavg1D: Cavg on first day
+Cavg1WC1: the average concentration in the first doing cycle(1w) equals to conc at the end of the first dosing cycle.
+CavgTE2WC1:similar to the Cavg1WC1, the dosing cycle is 2W.
+
+## 5.1 KM plot
+```{r}
+Group <- 4
+
+if(Group == 4) {
+   legend.labels_Q <-c("Q1: 0-0.25", "Q2: 0.25-0.5", "Q3: 0.5-0.75", "Q4: 0.75-1")
+   colors_Q <-c("red", "limegreen", "turquoise3", "blue2")
+   #PD including CL
+  df.ER.IDQ$TumorB_IDQ  <- quantiles(df.ER.IDQ, "TumorB")
+  df.ER.IDQ$Kgrow_IDQ  <- quantiles(df.ER.IDQ, "Kgrow")
+  df.ER.IDQ$kdecay_IDQ  <- quantiles(df.ER.IDQ, "kdecay")
+  df.ER.IDQ$EMAX_IDQ  <- quantiles(df.ER.IDQ, "EMAX")
+  df.ER.IDQ$EC50_IDQ  <- quantiles(df.ER.IDQ, "EC50")
+  df.ER.IDQ$Ktol_IDQ  <- quantiles(df.ER.IDQ, "Ktol")
+
+   #PK
+  df.ER.IDQ$CL_IDQ  <- quantiles(df.ER.IDQ, "CL")
+  df.ER.IDQ$Ctrough1D_IDQ  <- quantiles(df.ER.IDQ, "Ctrough1D")
+  df.ER.IDQ$CtroughOED_IDQ  <- quantiles(df.ER.IDQ, "CtroughOED")
+
+  df.ER.IDQ$Cavg1D_IDQ  <- quantiles(df.ER.IDQ, "Cavg1D")
+  df.ER.IDQ$Cavg2WC1_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WC1")
+  df.ER.IDQ$Cavg4WC1_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WC1")
+
+  df.ER.IDQ$CavgSS_IDQ  <- quantiles(df.ER.IDQ, "CavgSS")
+  df.ER.IDQ$Cavg2WSS_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WSS")
+  df.ER.IDQ$Cavg4WSS_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WSS")
+
+  df.ER.IDQ$CavgOED_IDQ  <- quantiles(df.ER.IDQ, "CavgOED")
+  df.ER.IDQ$Cavg1WOED_IDQ  <- quantiles(df.ER.IDQ, "Cavg1WOED")
+  df.ER.IDQ$Cavg2WOED_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WOED")
+  df.ER.IDQ$Cavg2WC1OED_IDQ  <- quantiles(df.ER.IDQ, "Cavg2WC1OED")
+  df.ER.IDQ$Cavg4WC1OED_IDQ  <- quantiles(df.ER.IDQ, "Cavg4WC1OED")
+
+  df.ER.IDQ$CavgTE_IDQ  <- quantiles(df.ER.IDQ, "CavgTE")
+  df.ER.IDQ$CavgTE2WC1_IDQ  <- quantiles(df.ER.IDQ, "CavgTE2WC1")
+  df.ER.IDQ$CavgTE4WC1_IDQ  <- quantiles(df.ER.IDQ, "CavgTE4WC1")
+
+    } else  {
+   legend.labels_Q <-c("Tertile1: 0-1/3", "Tertile2: 1/3-2/3", "Tertile3: 2/3-1")
+   colors_Q <-c("red", "limegreen", "blue2")  
+   
+      #PD including CL
+  df.ER.IDQ$TumorB_IDQ  <- tertile(df.ER.IDQ, "TumorB")
+  df.ER.IDQ$Kgrow_IDQ  <- tertile(df.ER.IDQ, "Kgrow")
+  df.ER.IDQ$kdecay_IDQ  <- tertile(df.ER.IDQ, "kdecay")
+  df.ER.IDQ$EMAX_IDQ  <- tertile(df.ER.IDQ, "EMAX")
+  df.ER.IDQ$EC50_IDQ  <- tertile(df.ER.IDQ, "EC50")
+  df.ER.IDQ$Ktol_IDQ  <- tertile(df.ER.IDQ, "Ktol")
+
+   #PK
+  df.ER.IDQ$CL_IDQ  <- tertile(df.ER.IDQ, "CL")
+  df.ER.IDQ$Ctrough1D_IDQ  <- tertile(df.ER.IDQ, "Ctrough1D")
+  df.ER.IDQ$CtroughOED_IDQ  <- tertile(df.ER.IDQ, "CtroughOED")
+  
+  df.ER.IDQ$Cavg1D_IDQ  <- tertile(df.ER.IDQ, "Cavg1D")
+  df.ER.IDQ$Cavg2WC1_IDQ  <- tertile(df.ER.IDQ, "Cavg2WC1")
+  df.ER.IDQ$Cavg4WC1_IDQ  <- tertile(df.ER.IDQ, "Cavg4WC1")
+
+  df.ER.IDQ$CavgSS_IDQ  <- tertile(df.ER.IDQ, "CavgSS")
+  df.ER.IDQ$Cavg2WSS_IDQ  <- tertile(df.ER.IDQ, "Cavg2WSS")
+  df.ER.IDQ$Cavg4WSS_IDQ  <- tertile(df.ER.IDQ, "Cavg4WSS")
+
+  df.ER.IDQ$CavgOED_IDQ  <- tertile(df.ER.IDQ, "CavgOED")
+  df.ER.IDQ$Cavg1WOED_IDQ  <- tertile(df.ER.IDQ, "Cavg1WOED")
+  df.ER.IDQ$Cavg2WOED_IDQ  <- tertile(df.ER.IDQ, "Cavg2WOED")
+  df.ER.IDQ$Cavg2WC1OED_IDQ  <- tertile(df.ER.IDQ, "Cavg2WC1OED")
+  df.ER.IDQ$Cavg4WC1OED_IDQ  <- tertile(df.ER.IDQ, "Cavg4WC1OED")
+
+  df.ER.IDQ$CavgTE_IDQ  <- tertile(df.ER.IDQ, "CavgTE")
+  df.ER.IDQ$CavgTE2WC1_IDQ  <- tertile(df.ER.IDQ, "CavgTE2WC1")
+  df.ER.IDQ$CavgTE4WC1_IDQ  <- tertile(df.ER.IDQ, "CavgTE4WC1")
+ }  
+
+  
+  KM.TumorBIDQ <- survfit(Surv(DAY, EVENT) ~ TumorB_IDQ, data = df.ER.IDQ )
+  KM.KgrowIDQ <- survfit(Surv(DAY, EVENT) ~ Kgrow_IDQ, data = df.ER.IDQ )
+  KM.kdecayIDQ <- survfit(Surv(DAY, EVENT) ~ kdecay_IDQ, data = df.ER.IDQ )
+  KM.EMAXIDQ <- survfit(Surv(DAY, EVENT) ~ EMAX_IDQ, data = df.ER.IDQ )
+  KM.EC50IDQ <- survfit(Surv(DAY, EVENT) ~ EC50_IDQ, data = df.ER.IDQ )
+  KM.KtolIDQ <- survfit(Surv(DAY, EVENT) ~ Ktol_IDQ, data = df.ER.IDQ )
+
+KMplot.PD1 <- KM_plot_G(KM.TumorBIDQ, df.ER.IDQ,"TumorB_IDQ",legend.labels_Q, colors_Q, 600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_TumorB.tiff")
+KMplot.PD2 <- KM_plot_G(KM.KgrowIDQ, df.ER.IDQ,"Kgrow_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_Kgrow.tiff")
+KMplot.PD3 <- KM_plot_G(KM.kdecayIDQ, df.ER.IDQ,"kdecay_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_kdecay.tiff")
+KMplot.PD4<- KM_plot_G(KM.EMAXIDQ, df.ER.IDQ,"EMAX_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_EMAX.tiff")
+KMplot.PD5 <- KM_plot_G(KM.EC50IDQ, df.ER.IDQ,"EC50_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_EC50.tiff")
+KMplot.PD6 <- KM_plot_G(KM.KtolIDQ, df.ER.IDQ,"Ktol_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_Ktol.tiff")
+
+KMplot.combined.PD <- grid.arrange(KMplot.PD1$plot, KMplot.PD2$plot, KMplot.PD3$plot, KMplot.PD4$plot, KMplot.PD5$plot, KMplot.PD6$plot, ncol = 3)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_PD.tiff",
+      plot = KMplot.combined.PD, 
+     width = 18, height = 10, dpi = 400, units = "in")
+
+#PK
+  KM.CLIDQ <- survfit(Surv(DAY, EVENT) ~ CL_IDQ, data = df.ER.IDQ )
+  KM.Ctrough1DIDQ <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = df.ER.IDQ )
+  KM.CtroughOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = df.ER.IDQ )
+  
+  KM.Cavg1DIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WC1IDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WC1_IDQ, data = df.ER.IDQ )
+  KM.Cavg4WC1IDQ <- survfit(Surv(DAY, EVENT) ~ Cavg4WC1_IDQ, data = df.ER.IDQ )
+
+  KM.CavgSSIDQ <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WSSIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WSS_IDQ, data = df.ER.IDQ )
+  KM.Cavg4WSSIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg4WSS_IDQ, data = df.ER.IDQ )
+
+  KM.CavgOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = df.ER.IDQ)
+  KM.Cavg1WOEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WOEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WOED_IDQ, data = df.ER.IDQ )
+  KM.Cavg2WC1OEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg2WC1OED_IDQ, data = df.ER.IDQ )
+  KM.Cavg4WC1OEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg4WC1OED_IDQ, data = df.ER.IDQ )
+
+  KM.CavgTEIDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = df.ER.IDQ )
+  KM.CavgTE2WC1IDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE2WC1_IDQ, data = df.ER.IDQ )
+  KM.CavgTE4WC1IDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE4WC1_IDQ, data = df.ER.IDQ )
+  
+plot.PD1 <- KM_plot_Q(KM.CLIDQ, df.ER.IDQ,"CL_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_CL.tiff")
+
+KMplot.PK1 <- KM_plot_G(KM.Ctrough1DIDQ, df.ER.IDQ,"Ctrough1D_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_Ctrough1D.tiff")
+KMplot.PK2 <- KM_plot_G(KM.Cavg1DIDQ, df.ER.IDQ,"Cavg1D_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_Cavg1D.tiff")
+KMplot.PK3 <- KM_plot_G(KM.CavgSSIDQ, df.ER.IDQ,"CavgSS_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_CavgSS.tiff")
+KMplot.PK4 <- KM_plot_G(KM.CavgOEDIDQ, df.ER.IDQ,"CavgOED_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_CavgOED.tiff")
+KMplot.PK5 <- KM_plot_G(KM.CtroughOEDIDQ, df.ER.IDQ,"CtroughOED_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_CtroughOED.tiff")
+KMplot.PK6 <- KM_plot_G(KM.Cavg1WOEDIDQ, df.ER.IDQ,"Cavg1WOED_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_Cavg1WOED.tiff")
+KMplot.PK7 <-KM_plot_G(KM.Cavg2WOEDIDQ, df.ER.IDQ,"Cavg2WOED_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_Cavg2WOED.tiff")
+KMplot.PK8 <- KM_plot_G(KM.CavgTEIDQ, df.ER.IDQ,"CavgTE_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_CavgTE.tiff")
+
+KMplot.combined.PK <- grid.arrange(KMplot.PK1$plot, KMplot.PK2$plot, KMplot.PK3$plot, KMplot.PK4$plot,KMplot.PK5$plot, KMplot.PK6$plot,KMplot.PK7$plot,KMplot.PK8$plot, ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_PFS_DH1_PK.tiff",
+      plot = KMplot.combined.PK, 
+     width = 20, height = 8, dpi = 400, units = "in") 
+
+   
+# summary the plot information based on quantiled exposure
+# stratified
+generate_summary_MSD <- function(covariates_G, data) {
+  summary_MSD <- data.frame(row.names = c("Q1", "Q2", "Q3", "Q4"))
+  event_IDQ <- data.frame(row.names = c("Q1", "Q2", "Q3", "Q4"))
+  
+  for (cov in covariates_G) {
+    KM_formula <- as.formula(paste("Surv(DAY, EVENT) ~", cov))
+    KM_obj <- tryCatch({
+      survfit(KM_formula, data = data)
+    }, error = function(e) {
+      warning(paste("Error creating KM object for", cov, ":", e$message))
+      return(NULL)
+    })
+    
+    if (!is.null(KM_obj)) {
+      KM_summary <- summary(KM_obj)
+      
+      # Extract events for event_IDQ
+      events <- KM_summary$table[,"events"]
+      event_IDQ[[cov]] <- events
+      
+      # Extract median, LCL, and UCL for summary_MSD
+      medians <- KM_summary$table[,"median"]
+      lcl <- KM_summary$table[,"0.95LCL"]
+      ucl <- KM_summary$table[,"0.95UCL"]
+      
+      # Combine median, LCL, and UCL in the required format
+      summary_MSD[[cov]] <- sprintf("%.0f (%.0f-%.0f)", medians, lcl, ucl)
+    }
+  }
+  
+  return(list(summary_MSD = summary_MSD, event_IDQ = event_IDQ))
+}
+
+covariates_G <- colnames(df.ER.IDQ)[c(28:50)]
+
+result <- generate_summary_MSD(covariates_G, df.ER.IDQ)
+summary_MSD <- result$summary_MSD
+event_IDQ <- result$event_IDQ
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+write.csv(summary_MSD, "summary table for MSD stratified by parameters.csv", row.names = TRUE)
+write.csv(event_IDQ, "summary table for PFS events stratified by parameters.csv", row.names = TRUE)
+
+# based on the dataset, create the plots to show the difference
+# Compare the median survival days distribution
+variables <- c("Ctrough1D_IDQ", "CavgSS_IDQ", "CavgOED_IDQ", "Cavg1WOED_IDQ", "Cavg2WOED_IDQ", "CavgTE_IDQ")
+colors_Q <- c("red", "limegreen", "turquoise3", "blue2")
+
+# Reshape the data
+plot_data <- summary_MSD %>%
+  select(all_of(variables)) %>%
+  mutate(Quartile = row.names(.)) %>%
+  pivot_longer(cols = -Quartile, names_to = "Variable", values_to = "Value") %>%
+  separate(Value, into = c("Median", "CI"), sep = " \\(") %>%
+  mutate(
+    Median = as.numeric(Median),
+    CI = gsub("\\)", "", CI),
+    Lower = as.numeric(sub("-.*", "", CI)),
+    Upper = as.numeric(sub(".*-", "", CI)),
+    Variable = factor(Variable, levels = variables)  # Set the factor levels to ensure correct order
+  )
+
+
+# Create the plot
+MSD_plot <- ggplot(plot_data, aes(x = Variable, y = Median, color = Quartile, group = Quartile)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), 
+                position = position_dodge(width = 0.5), 
+                width = 0.2) +
+  custom_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(paste("Comparison across stratified exposure metrics",doseamt,"mg"), 
+       x = NULL, 
+       y = "PFS median and Confidence Intervals") +
+  scale_color_manual(values = setNames(colors_Q, paste0("Q", 1:4))) +
+  scale_x_discrete(limits = variables)+
+  scale_y_continuous(limits = c(200, 600), breaks = seq(200, 600, by = 100))
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/MSD_plot.tiff",
+      plot = MSD_plot, 
+     width = 5, height = 4, dpi = 400, units = "in") 
+
+# Compare the event distribution
+# Reshape the data
+event_data <- event_IDQ %>%
+  select(all_of(variables)) %>%
+  mutate(Quartile = row.names(.)) %>%
+  pivot_longer(cols = -Quartile, names_to = "Variable", values_to = "Events") %>%
+  mutate(
+    Events = Events / 1000,  # Divide by 1000 as requested
+    Variable = factor(Variable, levels = variables)  # Set the factor levels to ensure correct order
+  )
+colors_Q <- c("Q1" = "#FF6666", "Q2" = "#6699FF", "Q3" = "#66CC66", "Q4" = "#FFAA66")
+# Create the bar plot
+Event_plot <-ggplot(event_data, aes(x = Variable, y = Events, fill = Quartile)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+   custom_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right") +
+     
+  labs(title = paste("Comparison of % of PFS Events -",doseamt,"mg"), 
+       x = "Variable",
+       y = "% of PFS Events") +
+ scale_fill_manual(values = setNames(colors_Q, paste0("Q", 1:4))) +
+  scale_x_discrete(limits = variables) +  # Ensure x-axis follows the specified order
+  scale_y_continuous(limits = c(0, 0.2), breaks = seq(0, 0.2, by = 0.05),
+                     labels = scales::number_format(accuracy = 0.01))
+
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Event percentage_plot.tiff",
+      plot = Event_plot, 
+     width = 5, height = 4, dpi = 400, units = "in") 
+```
+
+## 5.2 True ER PFS plot (embeded quantiled Boxplots)
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH1")
+
+True.ER <- read.csv("True ER_PFS.csv")
+True.ER.logistic <- read.csv("True ER_KM_PFS.csv")
+
+# Define custom theme
+custom_theme <- theme(
+  panel.background = element_rect(fill = "white", color = "black"),
+  legend.background = element_rect(fill = "transparent"),
+  legend.position = c(0.2, 0.9),
+  legend.title = element_blank(), 
+  legend.key.size = unit(0.5, "cm"),  # Adjust legend key size
+  legend.text = element_text(size = 8),
+  axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+  axis.text.y = element_text(size = 12),
+  axis.title = element_text(size = 14),
+  plot.title = element_text(size = 16, hjust = 0.5),
+  plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+)
+
+# Define custom log labels
+custom_log_labels <- scales::trans_format("log10", scales::math_format(10^.x))
+
+# Define colors for each quantile
+
+quantile_colors <- c("1" = "steelblue1", "2" = "steelblue2", "3" = "steelblue3", "4" = "steelblue4")
+
+ER_Q_plot <- function(data, df, x_var, group_var, quantile_colors) {
+  # Determine x-axis limits
+  x_limits <- range(data[[x_var]], na.rm = TRUE)
+  x_limits <- x_limits[is.finite(x_limits)]
+  x_limits[1] <- ifelse(x_limits[1] <= 0, 1, x_limits[1]) 
+
+  # Calculate median values
+  median_values <- df %>%
+    group_by(!!sym(group_var)) %>%
+    summarise(median = median(!!sym(x_var), na.rm = TRUE))
+
+  # Create the plot
+  violin_Q <- ggplot(df, aes(x = !!sym(x_var), y = factor(!!sym(group_var)), fill = factor(!!sym(group_var)))) +
+    geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+    scale_fill_manual(values = quantile_colors) +
+    labs(fill = "Quantile", x = x_var) +
+    theme_void() +
+    theme(panel.background = element_rect(fill = "transparent", color = NA),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          plot.title = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          legend.position = "bottom",
+          legend.key.size = unit(0.2, "cm"),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8)) +  
+    geom_text(data = median_values, 
+              aes(x = median, 
+                  y = factor(!!sym(group_var)), 
+                  label = sprintf("Median: %.0f", median)),
+              hjust = -0.4, #if the dose is 500mg, the value is 0.8
+              vjust = 0, 
+              size = 3) +
+    scale_x_log10(labels = custom_log_labels, limits = x_limits)
+
+# Define PFS_MSD_plot function
+ TrueER <- ggplot(data = data, aes(x = .data[[x_var]])) +
+    geom_line(aes(y = EVENT * max(MSD, na.rm = TRUE), color = "Event Rate"), size = 1) +
+    geom_point(aes(y = EVENT * max(MSD, na.rm = TRUE), color = "Event Rate"), size = 2) +
+    geom_text(aes(y = EVENT * max(MSD, na.rm = TRUE), label = DOSE), 
+              vjust = 0.2, hjust = -0.4, angle = 75, size = 3.5) +
+    geom_line(aes(y = MSD, color = "Median PFS"), size = 1) +
+    geom_point(aes(y = MSD, color = "Median PFS"), size = 2) +
+    custom_theme +
+    labs(
+      x = x_var,
+      y = "Median PFS time (Days)",
+      title = "True ER relationship for PFS",
+      color = "Measure"
+    ) +
+    scale_y_continuous(
+      sec.axis = sec_axis(~ . / max(data$MSD, na.rm = TRUE) * 100, 
+                          name = "% of event", 
+                          breaks = seq(0, 100, by = 20))
+    ) +
+    scale_x_log10(labels = custom_log_labels, limits = x_limits) +
+    scale_color_manual(values = c("Event Rate" = "black", "Median PFS" = "springgreen4"))
+ 
+  violin_Q_grob <- ggplotGrob(violin_Q)
+  
+  TrueER_plot <- TrueER  + 
+  annotation_custom(
+    grob =  violin_Q_grob,
+    ymin = 120, ymax=250)
+  
+  return( TrueER_plot)
+  
+}
+
+TrueER_1 <- ER_Q_plot(True.ER, df.ER.IDQ,  "Ctrough1D", "Ctrough1D_IDQ", quantile_colors)
+TrueER_2 <- ER_Q_plot(True.ER, df.ER.IDQ,  "Cavg1D", "Cavg1D_IDQ", quantile_colors)
+TrueER_3 <- ER_Q_plot(True.ER, df.ER.IDQ,  "CtroughOED", "CtroughOED_IDQ", quantile_colors)
+TrueER_4 <- ER_Q_plot(True.ER, df.ER.IDQ,  "CavgSS", "CavgSS_IDQ", quantile_colors)
+TrueER_5 <- ER_Q_plot(True.ER, df.ER.IDQ,  "CavgOED", "CavgOED_IDQ", quantile_colors)
+TrueER_6 <- ER_Q_plot(True.ER, df.ER.IDQ,  "Cavg1WOED", "Cavg1WOED_IDQ", quantile_colors)
+TrueER_7 <- ER_Q_plot(True.ER, df.ER.IDQ,  "Cavg2WOED", "Cavg2WOED_IDQ", quantile_colors)
+TrueER_8 <- ER_Q_plot(True.ER, df.ER.IDQ,  "CavgTE", "CavgTE_IDQ", quantile_colors)
+
+combine_ER <- grid.arrange(TrueER_1,TrueER_2,TrueER_3,TrueER_4,
+                           TrueER_5,TrueER_6,TrueER_7,TrueER_8, ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/PFS_DH1_ER.tiff",
+      plot = combine_ER, 
+     width = 24, height = 10, dpi = 400, units = "in")
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/PFS_DH1_ER_Ctrough1D.tiff",
+      plot = TrueER_1, 
+     width = 6, height = 4, dpi = 400, units = "in")
+
+```
+##5.3 Explore if KM plots having the power to detect true ER
+
+- Using the median values of quartiles Ctrough1D to get the corresponding doses;
+- Using 250 individuals for each dose level to generate the true ER datasets;
+- Plot KM Curve for true ER dataset;
+
+Dose:10mg(4,8,11,15); 20mg(7,17,23,31); 60mg(21,50,70,95);
+    100mg(35,85,115,158); 200mg(72,165,230,320); 500mg(180,410,580,800)
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship")
+PKPD_model_NoPK<- mread_cache("PKPD_tumor_onlyPD_havingW.mod")
+
+Dose_level <- c(180,410,580,800)
+groupsize <- 500
+
+One.ID <- function(id) {
+  data.frame(ID = id,
+             DAY = 1:600,
+             time = 24 * (1:600 - 1),
+             evid = 1,
+             cmt = 1)
+}
+IDs_list <- lapply(1:groupsize, One.ID)
+IDs_df <- do.call(rbind, IDs_list)
+
+df.ER.PFS <- list()
+analysis.PFS <- list()
+df.ER.IDQ.PFS<- list()
+
+for (Dose in Dose_level) {
+
+  DOSE_df <- data.frame(ID = 1:groupsize, amt = Dose)
+  idata.PKPD.PFS <- left_join(IDs_df, DOSE_df, by = c("ID"))
+
+  set.seed(20817)
+  out.pkpd.PFS <- mrgsim_df(PKPD_model_NoPK, 
+                 idata.PKPD.PFS,
+                 recover = "amt", 
+                 carry.out = "EVID",
+                 recsort = 3,
+                 tgrid = seq(0, 14400, by = 1))
+
+  out_df_PFS <- as.data.frame(out.pkpd.PFS)
+
+  exp_PFS <- out_df_PFS %>% 
+     filter(EVID == 0) %>%
+     select(-EVID,-GUT,-CENT,-PERIPH)%>%
+     mutate(DAY = ceiling(time/24),
+            CP = if_else(CP < 0, 0, CP), # replace the negative CP to 0
+            AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+     filter(time > 0)%>%
+     mutate(CavgTE = AUC/time)%>%  # average concentration time to event
+     group_by(ID, DAY) %>%
+     mutate(Cmax = max(CP),
+           Ctrough = tail(CP,1)) %>%
+     ungroup() %>%
+     rename(DOSE = amt,
+           TumorB= Tumor_0,
+           AUCTE=AUC,
+           Kgrow=KG,
+           kdecay=KD)%>%
+     filter(time %% 24 == 0)
+  
+ 
+   AUC1D_PFS <- exp_PFS %>%
+        group_by(ID) %>%
+  # Calculate the last AUCTE for each day for each ID
+        group_by(DAY, .add = TRUE) %>%
+        summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+  # Calculate daily AUC for each ID
+        group_by(ID) %>%
+        mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+        ungroup()%>%
+        select(-LastAUCTE)%>%
+        mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+   Combined_PFS <- left_join(exp_PFS, AUC1D_PFS, by = c("ID", "DAY"))
+
+# calculate all possible necessary exposure matrix
+   exp_PFS.2 <- Combined_PFS%>%
+     group_by(ID) %>%
+     mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+            AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+            AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+            AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+            Cavg = AUC1D / 24,
+            Cavg1W = AUC1W / (24*7),
+            Cavg2W = AUC2W / (24*14),
+            Cavg3W = AUC3W / (24*21),
+            Cavg4W = AUC4W / (24*28)) %>%
+     ungroup()%>%
+     select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W)%>%
+     mutate(Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+            Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+            Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+            Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))
+
+   df.exp_PFS <- exp_PFS.2 %>%
+             group_by(ID) %>%
+             mutate(
+                   Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                   Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                   Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28]),
+                   CavgTE2WC1 = if_else(DAY > 14, CavgTE, Cavg2W[DAY == 14]),
+                   CavgTE4WC1 = if_else(DAY > 28, CavgTE, Cavg4W[DAY == 28]),
+                   CavgSS = max(tail(Cavg, n = min(100, length(Cavg)))),
+                   Cavg1WSS = max(tail(Cavg1W, n = min(100, length(Cavg1W)))),
+                   Cavg2WSS = max(tail(Cavg2W, n = min(100, length(Cavg2W)))),
+                   Cavg4WSS = max(tail(Cavg4W, n = min(100, length(Cavg4W)))),
+                   CavgTESS = max(tail(CavgTE, n = min(100, length(CavgTE))))
+                   ) %>%
+             ungroup()
+   df_ER_PFS <- df.exp_PFS %>%
+           mutate(event = if_else(Tumor < 1.2 * TumorB, 0, 1),
+                   LAST = 0) %>%
+           group_by(ID) %>%
+  # Identify the first DAY where EVENT = 1 for each ID
+            mutate(first_event_day = ifelse(event == 1, DAY, NA_real_)) %>%
+            mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+  # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+            filter((event == 0 & DAY < first_event_day) | (event == 1 & DAY == first_event_day)) %>%
+            mutate(last_day = max(DAY)) %>%
+            mutate(LAST = if_else(DAY == last_day | event == 1, 1, LAST)) %>%
+            ungroup() %>%
+            select(-first_event_day, -last_day) %>%
+            rename(EVENT = event)
+
+   analysis_PFS <- df_ER_PFS %>%
+               filter(LAST == 1)
+   
+   df_ER_ID_PFS <- df_ER_PFS %>%
+            filter(DAY == 1) %>%
+            select(ID,DOSE,CL,Ctrough, Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+   G_ID_PFS <-  analysis_PFS[,c("ID","DAY","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE",         "CavgTE2WC1","CavgTE4WC1","CavgSS","Cavg2WSS","Cavg4WSS","EVENT","LAST")]%>%
+             rename(CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+   df_ER_IDQ_PFS <- merge(df_ER_ID_PFS, G_ID_PFS, by = "ID")%>%
+                    select(ID, DAY, DOSE, LAST, EVENT, CL, 
+                    Ctrough1D, Cavg1D,CavgSS,CtroughOED,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WSS,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WSS,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+   
+   
+     df.ER.PFS[[as.character(Dose)]] <- df_ER_PFS
+     analysis.PFS[[as.character(Dose)]] <- analysis_PFS
+     df.ER.IDQ.PFS[[as.character(Dose)]] <- df_ER_IDQ_PFS
+}
+
+
+combined_PFS_4level <- df.ER.IDQ.PFS %>% 
+                bind_rows(.id = "Dose_Level")
+
+combined_PFS_4level$DOSE_IDQ  <- quantiles(combined_PFS_4level , "DOSE")
+combined_PFS_4level$Ctrough1D_IDQ  <- quantiles(combined_PFS_4level , "Ctrough1D")
+combined_PFS_4level$Cavg1D_IDQ  <- quantiles(combined_PFS_4level , "Cavg1D")
+combined_PFS_4level$CavgSS_IDQ  <- quantiles(combined_PFS_4level , "CavgSS")
+combined_PFS_4level$CtroughOED_IDQ  <- quantiles(combined_PFS_4level , "CtroughOED")
+combined_PFS_4level$CavgOED_IDQ  <- quantiles(combined_PFS_4level , "CavgOED")
+combined_PFS_4level$Cavg1WOED_IDQ  <- quantiles(combined_PFS_4level , "Cavg1WOED")
+combined_PFS_4level$CavgTE_IDQ  <- quantiles(combined_PFS_4level , "CavgTE")
+  
+  KM.DOSEIDQ <- survfit(Surv(DAY, EVENT) ~ DOSE_IDQ, data = combined_PFS_4level )
+  KM.Ctrough1DIDQ <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = combined_PFS_4level )
+  KM.Cavg1DIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = combined_PFS_4level)
+  KM.CavgSSIDQ <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = combined_PFS_4level)
+  KM.CtroughOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = combined_PFS_4level)
+  KM.CavgOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = combined_PFS_4level)
+  KM.Cavg1WOEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = combined_PFS_4level)
+  KM.CavgTEIDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = combined_PFS_4level)
+  
+     legend.labels_Q <-c("Q1: 0-0.25", "Q2: 0.25-0.5", "Q3: 0.5-0.75", "Q4: 0.75-1")
+   colors_Q <-c("red", "limegreen", "turquoise3", "blue2")
+  
+TER_KMplot.PK1 <- KM_plot_G(KM.DOSEIDQ, combined_PFS_4level,"DOSE_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_DOSE.tiff")
+TER_KMplot.PK2 <- KM_plot_G(KM.Ctrough1DIDQ, combined_PFS_4level,"Ctrough1D_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_Ctrough1D.tiff")
+TER_KMplot.PK3 <- KM_plot_G(KM.Cavg1DIDQ, combined_PFS_4level,"Cavg1D_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_Cavg1D.tiff")
+TER_KMplot.PK4 <- KM_plot_G(KM.CavgSSIDQ, combined_PFS_4level,"CavgSS_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_CavgSS.tiff")
+TER_KMplot.PK5 <- KM_plot_G(KM.CavgOEDIDQ, combined_PFS_4level,"CavgOED_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_CavgOED.tiff")
+TER_KMplot.PK6 <- KM_plot_G(KM.CtroughOEDIDQ, combined_PFS_4level,"CtroughOED_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_CtroughOED.tiff")
+TER_KMplot.PK7 <- KM_plot_G(KM.Cavg1WOEDIDQ, combined_PFS_4level,"Cavg1WOED_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_Cavg1WOED.tiff")
+TER_KMplot.PK8 <- KM_plot_G(KM.CavgTEIDQ, combined_PFS_4level,"CavgTE_IDQ",legend.labels_Q, colors_Q,600,
+       "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/KM_ORR_DH1_CavgTE.tiff")
+
+TER_KMplot.combined.PK <- grid.arrange(TER_KMplot.PK1$plot, TER_KMplot.PK2$plot, TER_KMplot.PK3$plot, TER_KMplot.PK4$plot,
+                                   TER_KMplot.PK5$plot, TER_KMplot.PK6$plot,TER_KMplot.PK7$plot,TER_KMplot.PK8$plot, ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/True ER_KM_PFS_4level_500id.tiff",
+      plot = TER_KMplot.combined.PK, 
+     width = 20, height = 8, dpi = 400, units = "in") 
+
+## save the corresponding combined_PFS_4level (df.ER.IDQ) dataset
+write.csv(combined_PFS_4level, "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/df_ER_IDQ_4DOSE_250id.csv", row.names = FALSE)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+df.ER.IDQ <- read.csv("df_ER_IDQ.csv")
+
+variables_to_abstract <- colnames(df.ER.IDQ)[c(5,6,9,10,13:18,21,26)]
+#CoxPH conc analysis result
+covariates <- colnames(combined_PFS_4level)[c(8:24)]
+
+univ_formulas <- sapply(covariates, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+univ_models <- lapply(univ_formulas, function(x) { coxph(x, data = combined_PFS_4level) })
+univ_con_result_T <- univ_con(univ_models)%>%
+   as.data.frame() %>%
+  rownames_to_column(var = "Variable")
+CoxPH_conc__T_abstract <- univ_con_result_T %>% filter (Variable%in% variables_to_abstract)%>% select(Variable,beta,P.Value)
+## summary table for all IDs
+combined_analysis_4level <- analysis.PFS %>% 
+                bind_rows(.id = "Dose_Level")
+
+TrueER_PK_summary <- combined_analysis_4level%>%
+              select(ID,DAY,DOSE,CL,CP,Cmax, Ctrough,Cavg,CavgTE,TumorB,Kgrow, kdecay, EMAX,EC50, Ktol, Tumor, EVENT)%>%
+              summarise(across(everything(), ~ summary(.x)))
+row_names <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")
+rownames(TrueER_PK_summary) <- row_names
+TrueER_PK_summary <- TrueER_PK_summary  %>% rownames_to_column(var = "Statistic")
+
+
+TrueER_PFS.Event <-  combined_analysis_4level %>%
+                      select(ID,DAY,DOSE,CL,CP,Cmax, Ctrough,Cavg,CavgTE,TumorB,Kgrow, kdecay, EMAX,EC50, Ktol, Tumor, EVENT)%>%
+                      filter(EVENT==1)%>%
+                      summarise(across(everything(), ~ summary(.x)))
+rownames(TrueER_PFS.Event) <- row_names
+TrueER_PFS.Event <- TrueER_PFS.Event%>% rownames_to_column(var = "Statistic")
+                    
+TrueER_PFS.noEvent <-  combined_analysis_4level %>%
+                      select(ID,DAY,DOSE,CL,CP,Cmax, Ctrough,Cavg,CavgTE,TumorB,Kgrow, kdecay, EMAX,EC50, Ktol, Tumor, EVENT)%>%
+                      filter(EVENT!=1)%>%
+                      summarise(across(everything(), ~ summary(.x)))
+rownames(TrueER_PFS.noEvent) <- row_names
+TrueER_PFS.noEvent <- TrueER_PFS.noEvent%>% rownames_to_column(var = "Statistic")
+                    
+Tb <- createWorkbook()
+addWorksheet(Tb, "CoxPH Conc Abstract")
+addWorksheet(Tb, "CoxPH Conc Result")
+addWorksheet(Tb, "PFS summary")
+addWorksheet(Tb, "ID having PFS")
+addWorksheet(Tb, "ID without PFS")
+writeData(Tb, sheet = "CoxPH Conc Abstract", x = CoxPH_conc__T_abstract)
+writeData(Tb, sheet = "CoxPH Conc Result", x = univ_con_result_T)
+writeData(Tb, sheet = "PFS summary", x = TrueER_PK_summary)
+writeData(Tb, sheet = "ID having PFS", x = TrueER_PFS.Event)
+writeData(Tb, sheet = "ID without PFS", x = TrueER_PFS.noEvent)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+saveWorkbook(Tb, file = "TER 4 dose level results.xlsx", overwrite = TRUE)
+
+variables <- c("CL", "TumorB", "Kgrow", "kdecay", "EMAX", "EC50", "Ktol", "Cavg", "CavgTE")
+analysis_4level <- combined_analysis_4level%>%
+    pivot_longer(
+    cols = all_of(variables),
+    names_to = "Variable",
+    values_to = "Value"
+  ) 
+
+TrueER_PFS <- ggplot(analysis_4level, aes(x = factor(DOSE), y = Value, color = factor(EVENT))) +
+  geom_boxplot() +
+  facet_wrap(~ Variable, scales = "free_y", nrow = 3) +
+  labs(title = "Baseline Comparison of PK & PD Parameters Across Dose and Event",
+       x = "Dose",
+       y = "Value") +
+  scale_color_manual(values = c("blue", "red"),  
+                     name = "Event Type",
+                     labels = c("No event", "Event")) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.background = element_rect(fill = "lightgrey"),
+        strip.text = element_text(face = "bold"),
+        legend.position = "right")  
+TrueER_PFS
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/True ER_boxplot_PFS_4level_500id.tiff",
+      plot = TrueER_PFS, 
+     width = 20, height = 8, dpi = 400, units = "in") 
+```
+## 5.4 Merge KM plots 
+### Input the datasets
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship")
+True.ER <- read.csv("True ER_PFS.csv")
+True.ER.logistic <- read.csv("True ER_KM_PFS.csv")
+  
+Ctrough1D_km_T <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = True.ER.logistic)
+Cavg1D_km_T <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = True.ER.logistic)
+CavgSS_km_T <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = True.ER.logistic)
+CtroughOED_km_T <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = True.ER.logistic)
+CavgOED_km_T <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = True.ER.logistic)
+Cavg1WOED_km_T <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = True.ER.logistic)
+CavgTE_km_T <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = True.ER.logistic)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+combined_PFS_4level <- read.csv("df_ER_IDQ_4DOSE_250id.csv")
+KM.Ctrough1DIDQ_4D <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = combined_PFS_4level )
+KM.Cavg1DIDQ_4D <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = combined_PFS_4level)
+KM.CavgSSIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = combined_PFS_4level)
+KM.CtroughOEDIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = combined_PFS_4level)
+KM.CavgOEDIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = combined_PFS_4level)
+KM.Cavg1WOEDIDQ_4D <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = combined_PFS_4level)
+KM.CavgTEIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = combined_PFS_4level)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+df.ER.IDQ <- read.csv("df_ER_IDQ.csv")
+KM.Ctrough1DIDQ <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = df.ER.IDQ )
+KM.Cavg1DIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = df.ER.IDQ )
+KM.CavgSSIDQ <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = df.ER.IDQ )
+KM.CtroughOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = df.ER.IDQ )
+KM.CavgOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = df.ER.IDQ)
+KM.Cavg1WOEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = df.ER.IDQ )
+KM.CavgTEIDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = df.ER.IDQ )
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis") 
+df.ER.IDQ.Control <- read.csv("df_ER_IDQ_PFS_NOTreatment.csv")
+df.ER.IDQ.Control$DOSE_IDQ  <- 0
+  
+merged_df.ER.IDQ <- bind_rows(df.ER.IDQ.Control, df.ER.IDQ)
+merged_combined_PFS_4level <- bind_rows(df.ER.IDQ.Control, combined_PFS_4level)
+
+merged_KM.Ctrough1DIDQ_4D <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = merged_combined_PFS_4level)
+merged_KM.Cavg1DIDQ_4D <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = merged_combined_PFS_4level)
+merged_KM.CavgSSIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = merged_combined_PFS_4level)
+merged_KM.CtroughOEDIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = merged_combined_PFS_4level)
+merged_KM.CavgOEDIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = merged_combined_PFS_4level)
+merged_KM.Cavg1WOEDIDQ_4D <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = merged_combined_PFS_4level)
+merged_KM.CavgTEIDQ_4D <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = merged_combined_PFS_4level)
+
+merged_KM.Ctrough1DIDQ <- survfit(Surv(DAY, EVENT) ~ Ctrough1D_IDQ, data = merged_df.ER.IDQ)
+merged_KM.CtroughOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CtroughOED_IDQ, data = merged_df.ER.IDQ)
+merged_KM.Cavg1DIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1D_IDQ, data = merged_df.ER.IDQ)
+merged_KM.CavgSSIDQ <- survfit(Surv(DAY, EVENT) ~ CavgSS_IDQ, data = merged_df.ER.IDQ)
+merged_KM.CavgOEDIDQ <- survfit(Surv(DAY, EVENT) ~ CavgOED_IDQ, data = merged_df.ER.IDQ)
+merged_KM.Cavg1WOEDIDQ <- survfit(Surv(DAY, EVENT) ~ Cavg1WOED_IDQ, data = merged_df.ER.IDQ)
+merged_KM.CavgTEIDQ <- survfit(Surv(DAY, EVENT) ~ CavgTE_IDQ, data = merged_df.ER.IDQ)
+```
+### KM plots 
+```{r}
+KMplot_comparison <- function(Index,variable, variable_IDQ, km_object1, data1, km_object2, data2) {
+  
+  # KM plot
+  combined_KM <- KM_plot_combined(variable, km_object1, km_object2, data1, data2)
+  
+  # Cox regression
+  CoxPH <- CoxPH_res(variable, data1, data2)
+  
+  # Round numeric values in the table to 2 decimal places
+ # CoxPH[] <- lapply(CoxPH, function(x) if(is.numeric(x)) round(x, 3) else x)
+  
+  # Adjust the table
+  res_table <- tableGrob(CoxPH, rows = NULL, theme = custom_table_theme)
+  res_table$widths <- unit(rep(0.8/ncol(CoxPH), ncol(CoxPH)), "npc")
+  res_table$heights <- unit(c(0.25, rep(0.5/nrow(CoxPH), nrow(CoxPH))), "npc")
+  
+  # Generate the boxplot for exposure metrics
+  a <- Index
+  conc_plot <- generate_PFS_conc_plot(variable, variable_IDQ, data1, data2, a)
+  
+  # Combine the plot and table
+  final_plot <- grid.arrange(combined_KM, res_table, conc_plot,
+                             heights = c(0.6, 0.15, 0.25),
+                             nrow = 3)
+  
+  # Automatically save the plot
+  if (Index == 1) {
+  save_path <- file.path(
+    "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/C_True vs 4dose", 
+    paste0("True_4Dlevel_", variable, ".tiff")
+  )
+} else if (Index == 2) {
+  save_path <- file.path(
+    "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/C_True vs Observation", 
+    paste0("True_Observation_", variable, ".tiff")
+  )
+} else if (Index == 3) {
+  save_path <- file.path(
+    "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/C_4dose vs Observation", 
+    paste0("4Dlevel_observation_", variable, ".tiff")
+  )
+} else if (Index == 4) {
+    save_path <- file.path(
+    "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/C_4dose vs Observation with control", 
+    paste0("5Dlevel_observation_", variable, ".tiff")
+  )
+} 
+  ggsave(save_path, plot = final_plot, width = 5, height = 6, dpi = 400, units = "in")
+  
+  return(final_plot)
+}
+
+## true ER with combined_PFS_4level(df.ER IDQ for 4 dose level
+Index <- 1
+KMplot_comparison(Index, "Ctrough1D", "Ctrough1D_IDQ", Ctrough1D_km_T, True.ER.logistic, KM.Ctrough1DIDQ_4D, combined_PFS_4level)
+KMplot_comparison(Index,"Cavg1D", "Cavg1D_IDQ", Cavg1D_km_T, True.ER.logistic, KM.Cavg1DIDQ_4D, combined_PFS_4level)
+KMplot_comparison(Index,"CavgSS", "CavgSS_IDQ", CavgSS_km_T, True.ER.logistic, KM.CavgSSIDQ_4D, combined_PFS_4level)
+KMplot_comparison(Index,"CtroughOED", "CtroughOED_IDQ", CtroughOED_km_T, True.ER.logistic, KM.CtroughOEDIDQ_4D, combined_PFS_4level)
+KMplot_comparison(Index,"CavgOED", "CavgOED_IDQ", CavgOED_km_T, True.ER.logistic, KM.CavgOEDIDQ_4D, combined_PFS_4level)
+KMplot_comparison(Index,"Cavg1WOED", "Cavg1WOED_IDQ", Cavg1WOED_km_T, True.ER.logistic,KM.Cavg1WOEDIDQ_4D, combined_PFS_4level)
+KMplot_comparison(Index,"CavgTE", "CavgTE_IDQ", CavgTE_km_T, True.ER.logistic,  KM.CavgTEIDQ_4D, combined_PFS_4level)
+
+## true ER with df.ER.IDQ
+Index <- 2
+KMplot_comparison(Index,"Ctrough1D", "Ctrough1D_IDQ", Ctrough1D_km_T, True.ER.logistic, KM.Ctrough1DIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"Cavg1D", "Cavg1D_IDQ", Cavg1D_km_T, True.ER.logistic, KM.Cavg1DIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CavgSS", "CavgSS_IDQ", CavgSS_km_T, True.ER.logistic, KM.CavgSSIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CtroughOED", "CtroughOED_IDQ", CtroughOED_km_T, True.ER.logistic,  KM.CtroughOEDIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CavgOED", "CavgOED_IDQ", CavgOED_km_T, True.ER.logistic, KM.CavgOEDIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"Cavg1WOED", "Cavg1WOED_IDQ", Cavg1WOED_km_T, True.ER.logistic, KM.Cavg1WOEDIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CavgTE", "CavgTE_IDQ", CavgTE_km_T, True.ER.logistic,  KM.CavgTEIDQ, df.ER.IDQ)
+## combined_PFS_4level with df.ER.IDQ
+Index <- 3
+KMplot_comparison(Index,"Ctrough1D", "Ctrough1D_IDQ", KM.Ctrough1DIDQ_4D, combined_PFS_4level, KM.Ctrough1DIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"Cavg1D", "Cavg1D_IDQ", KM.Cavg1DIDQ_4D, combined_PFS_4level, KM.Cavg1DIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CavgSS", "CavgSS_IDQ", KM.CavgSSIDQ_4D, combined_PFS_4level, KM.CavgSSIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CtroughOED", "CtroughOED_IDQ", KM.CtroughOEDIDQ_4D, combined_PFS_4level,  KM.CtroughOEDIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CavgOED", "CavgOED_IDQ", KM.CavgOEDIDQ_4D, combined_PFS_4level, KM.CavgOEDIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"Cavg1WOED", "Cavg1WOED_IDQ", KM.Cavg1WOEDIDQ_4D, combined_PFS_4level, KM.Cavg1WOEDIDQ, df.ER.IDQ)
+KMplot_comparison(Index,"CavgTE", "CavgTE_IDQ", KM.CavgTEIDQ_4D, combined_PFS_4level,  KM.CavgTEIDQ, df.ER.IDQ)
+
+Index <- 4
+KMplot_comparison(Index,"Ctrough1D", "Ctrough1D_IDQ", merged_KM.Ctrough1DIDQ_4D, merged_combined_PFS_4level, merged_KM.Ctrough1DIDQ, merged_df.ER.IDQ)
+KMplot_comparison(Index,"Cavg1D", "Cavg1D_IDQ", merged_KM.Cavg1DIDQ_4D, merged_combined_PFS_4level, merged_KM.Cavg1DIDQ, merged_df.ER.IDQ)
+KMplot_comparison(Index,"CavgSS", "CavgSS_IDQ", merged_KM.CavgSSIDQ_4D, merged_combined_PFS_4level, merged_KM.CavgSSIDQ, merged_df.ER.IDQ)
+KMplot_comparison(Index,"CtroughOED", "CtroughOED_IDQ", merged_KM.CtroughOEDIDQ_4D, merged_combined_PFS_4level,  merged_KM.CtroughOEDIDQ, merged_df.ER.IDQ)
+KMplot_comparison(Index,"CavgOED", "CavgOED_IDQ", merged_KM.CavgOEDIDQ_4D, merged_combined_PFS_4level, merged_KM.CavgOEDIDQ, merged_df.ER.IDQ)
+KMplot_comparison(Index,"Cavg1WOED", "Cavg1WOED_IDQ", merged_KM.Cavg1WOEDIDQ_4D, merged_combined_PFS_4level, merged_KM.Cavg1WOEDIDQ, merged_df.ER.IDQ)
+KMplot_comparison(Index,"CavgTE", "CavgTE_IDQ", merged_KM.CavgTEIDQ_4D, merged_combined_PFS_4level, merged_KM.CavgTEIDQ, merged_df.ER.IDQ)
+
+```
+
+##5.5 Logistic plot(General linear model)
+```{r}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/True ER relationship/DH1")
+True.ER <- read.csv("True ER_PFS.csv")
+True.ER.logistic <- read.csv("True ER_KM_PFS.csv")
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+df.ER.IDQ <- read.csv("df_ER_IDQ.csv")
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis") 
+df.ER.IDQ.Control <- read.csv("df_ER_IDQ_PFS_NOTreatment.csv")
+df.ER.IDQ.Control$DOSE_IDQ  <- 0
+  
+merged_df.ER.IDQ <- bind_rows(df.ER.IDQ.Control, df.ER.IDQ)
+
+# #PD
+# Logiplot.1 <- logistic_regression_PD( df.ER.IDQ, "TumorB", "EVENT")
+# Logiplot.2 <- logistic_regression_PD( df.ER.IDQ, "Kgrow", "EVENT")
+# Logiplot.3 <- logistic_regression_PD( df.ER.IDQ, "kdecay", "EVENT")
+# Logiplot.4 <- logistic_regression_PD( df.ER.IDQ, "EMAX", "EVENT")
+# Logiplot.5 <- logistic_regression_PD( df.ER.IDQ, "EC50", "EVENT")
+# Logiplot.6 <- logistic_regression_PD( df.ER.IDQ, "Ktol", "EVENT")
+# 
+# Logistic_combine_PD <- grid.arrange(Logiplot.1,Logiplot.2,Logiplot.3, Logiplot.4,Logiplot.5,Logiplot.6, ncol = 3)
+# 
+# 
+# ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Logistic regression plot_PD.tiff",
+#       plot = Logistic_combine_PD, 
+#      width = 12, height = 6, dpi = 400, units = "in")
+
+#PK without control group
+Logiplot1 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "Ctrough1D", "EVENT")
+Logiplot2 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "Cavg1D", "EVENT")
+Logiplot3 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "CtroughOED", "EVENT")
+Logiplot4 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "CavgSS", "EVENT")
+Logiplot5 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "CavgOED", "EVENT")
+Logiplot6 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "Cavg1WOED", "EVENT")
+Logiplot7 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "Cavg2WOED", "EVENT")
+Logiplot8 <- logistic_regression_PK(True.ER, True.ER.logistic,df.ER.IDQ, "CavgTE", "EVENT")
+
+Logistic_combine_PK <- grid.arrange(Logiplot1, Logiplot2, Logiplot3, Logiplot4,Logiplot5,Logiplot6,Logiplot7,Logiplot8, ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Logistic regression plot_conc.tiff",
+      plot = Logistic_combine_PK, 
+     width = 20, height = 8, dpi = 400, units = "in")
+
+#PK with control group
+merged_df.ER.IDQ_correct <- merged_df.ER.IDQ %>%
+                            mutate(Ctrough1D = ifelse(Ctrough1D == 0, 0.001, Ctrough1D),
+                                   Cavg1D = ifelse(Cavg1D == 0, 0.001, Cavg1D),
+                                    CavgSS = ifelse(CavgSS == 0, 0.001, CavgSS),
+                                   CtroughOED = ifelse(CtroughOED == 0, 0.001, CtroughOED),
+                                   CavgOED = ifelse(CavgOED == 0, 0.001, CavgOED),
+                                   Cavg1WOED = ifelse(Cavg1WOED == 0, 0.001, Cavg1WOED),
+                                  Cavg2WOED = ifelse(Cavg2WOED == 0, 0.001, Cavg2WOED),
+                                   CavgTE = ifelse(CavgTE == 0, 0.001, CavgTE) )
+
+Logiplot1_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "Ctrough1D", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logiplot2_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "Cavg1D", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logiplot3_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "CtroughOED", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logiplot4_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "CavgSS", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logiplot5_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "CavgOED", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logiplot6_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "Cavg1WOED", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logiplot7_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "Cavg2WOED", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logiplot8_c <- logistic_regression_PK(True.ER, True.ER.logistic,merged_df.ER.IDQ_correct, "CavgTE", "EVENT")+coord_cartesian(xlim = c(0.1, NA))
+Logistic_combine_PK_c <- grid.arrange(Logiplot1_c, Logiplot2_c, Logiplot3_c, Logiplot4_c,
+                                      Logiplot5_c, Logiplot6_c, Logiplot7_c, Logiplot8_c, ncol = 4)
+
+ggsave("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Logistic regression plot_conc_Control.tiff",
+      plot = Logistic_combine_PK_c, 
+     width = 16, height = 6, dpi = 400, units = "in")
+
+# logistic regression analysis
+covariates <- colnames(merged_df.ER.IDQ_correct)[c(8:13,16,21)]
+
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+logistic_Results_control <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = merged_df.ER.IDQ_correct))
+logistic_result_control <- logistic_analysis(logistic_Results_control,covariates)
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg")
+write.csv(logistic_result_control, "Logistic regression with control.csv", row.names = TRUE)
+
+```
+## 5.6 Conventional ER analysis
+
+```{r}
+Group = 4
+#1. Perform Wilcox Test for the exposures grouped by IDs 
+## get the mean values for the exposures
+ID.e <- df.ER.IDQ %>% filter(EVENT==1)
+ID.n <- df.ER.IDQ %>% filter(EVENT==0)
+
+covariates  <- colnames(df.ER.IDQ)[c(5:27)]
+
+wilcox_result <- wilcox(ID.e, ID.n, covariates)%>%
+  rownames_to_column(var = "Variable")
+
+#2. univariate Cox PH regression_continuous covariate
+univ_formulas <- sapply(covariates, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+univ_models <- lapply(univ_formulas, function(x) { coxph(x, data = df.ER.IDQ) })
+univ_con_result <- univ_con(univ_models)%>%
+   as.data.frame() %>%
+  rownames_to_column(var = "Variable")
+
+#3. logistic regression analysis
+
+logistic_formulas <- sapply(covariates, function(x) as.formula(paste('EVENT ~', x)))
+logistic_Results <- lapply(logistic_formulas, function(x) glm(x, family = binomial(logit), data = df.ER.IDQ))
+logistic_result <- logistic_analysis(logistic_Results,covariates)%>%
+  rownames_to_column(var = "Variable")
+
+#4. univariate Cox PH regression_categorical covariate
+# covariates_G <- colnames(df.ER.IDQ)[c(28:50)]
+# 
+# if(Group == 4) {
+# univ_formulas_G <- sapply(covariates_G, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+# univ_models_G <- lapply(univ_formulas_G, function(x) { coxph(x, data = df.ER.IDQ) })
+# univ_cat_result <- univ_cat( univ_models_G)%>%
+#    as.data.frame() %>%
+#   rownames_to_column(var = "Variable")
+# 
+#    } else  {
+#  
+# univ_formulas_G <- sapply(covariates_G, function(x) as.formula(paste('Surv(DAY, EVENT) ~', x)))
+# univ_models_G <- lapply(univ_formulas_G, function(x) { coxph(x, data = df.ER.IDQ) })
+# univ_cat_result <- univ_cat_T( univ_models_G)%>%
+#    as.data.frame() %>%
+#   rownames_to_column(var = "Variable")
+# }     
+
+wb <- createWorkbook()
+addWorksheet(wb, "Logistic Result")
+addWorksheet(wb, "CoxPH Conc Result")
+# addWorksheet(wb, "CoxPH cate Result")
+addWorksheet(wb, "wilcox result")
+
+writeData(wb, sheet = "Logistic Result", x = logistic_result)
+writeData(wb, sheet = "CoxPH Conc Result", x = univ_con_result)
+# writeData(wb, sheet = "CoxPH cate Result", x = univ_cat_result)
+writeData(wb, sheet = "wilcox result", x = wilcox_result)
+
+# abstract the results
+variables_to_abstract <- colnames(df.ER.IDQ)[c(5,6,9,10,12:17,20,25)]
+logistic_result_abstract <- logistic_result %>% filter (Variable%in% variables_to_abstract)
+CoxPH_conc_abstract <- univ_con_result %>% filter (Variable%in% variables_to_abstract)%>% select(Variable,beta,P.Value)
+
+wb_abstract <- createWorkbook()
+addWorksheet(wb_abstract, "Logistic Result Abstract")
+addWorksheet(wb_abstract, "CoxPH Conc Abstract")
+writeData(wb_abstract, sheet = "Logistic Result Abstract", x = logistic_result_abstract)
+writeData(wb_abstract, sheet = "CoxPH Conc Abstract", x = CoxPH_conc_abstract)
+
+setwd( "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg") 
+saveWorkbook(wb, file = "Conventional ER methods result.xlsx", overwrite = TRUE)
+saveWorkbook(wb_abstract, file = "CoxPH&logistic abstract result.xlsx", overwrite = TRUE)
+```
+
+
+##5.7 logistic plot(Emax model) with control
+- the estimated Emax is the probability of event%.
+```{r}
+#input the true ER relationship dataset
+random_seed <- 2024
+set.seed(random_seed)
+covariates <- c("Ctrough1D", "Cavg1D","CavgSS", "CtroughOED", "CavgOED", "Cavg1WOED","Cavg2WOED", "CavgTE")
+
+# covariates <- c("Cavg1D")
+
+ wb <- createWorkbook()
+
+# Loop through each covariate
+for (cov in covariates) {
+  
+  y_var <- "EVENT"
+  
+  # Update the model formula
+  model <- bf(
+    as.formula(paste("EVENT ~ E0 + Emax *", cov, "/ (EC50 +", cov, ")")),
+    E0 + Emax + EC50 ~ 1,
+    nl = TRUE
+  )
+
+  # Define the priors
+  p <- prior(normal(10, 5), nlpar = "E0") +
+       prior(normal(50, 25), nlpar = "Emax") +
+       prior(normal(75, 50), nlpar = "EC50", lb = 0) 
+    
+  # Fit the model############Change data#########################
+  fit <- brm(
+    model,
+    prior = p,
+    data = merged_df.ER.IDQ,
+    cores = 4,
+    control = list(adapt_delta = .99)
+  )
+
+   # Extract the conditional effects plot
+  ce <- conditional_effects(fit) 
+   
+  ce_data <- ce[[1]]
+  
+  # Create the plot object with all customizations
+  plot_obj <- ggplot(ce_data, aes(x = .data[[cov]], y = estimate__, color="Logistic Regression")) +
+    geom_line(size = 1) +
+   geom_ribbon(aes(ymin = lower__, ymax = upper__), alpha = 0.2, fill = "black") +
+   
+    # Adding the True ER lines for DH1
+    geom_line(data = True.ER, aes(x = .data[[cov]], y = .data[[y_var]], color = "True ER_DH1"), size = 1.5) +
+    geom_point(data = True.ER, aes(x = .data[[cov]], y = .data[[y_var]], color = "True ER_DH1"), size = 2) +
+    geom_text(data = True.ER, aes(x = .data[[cov]], y = .data[[y_var]], label = DOSE, color = "True ER_DH1"), 
+              vjust = 0.2, hjust = -0.4, angle = 75, size = 3.5) +
+    custom_theme +
+      theme(
+      panel.background = element_rect(fill = "white", color = "black"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.position = c(0.3, 0.3),
+      legend.title = element_blank(),
+      axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+        ) +
+    labs(x = cov, 
+         y = "Probability of PFS Event",
+        title = paste("Logistic Regression(Emax) -", cov)) +
+    scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+    coord_cartesian(ylim = c(0, 1), xlim = c(0.1, NA))+
+    scale_x_log10(labels = custom_log_labels) +
+    scale_color_manual(values = c("Logistic Regression" = "black", "True ER_DH1" = "forestgreen"))
+
+  # Save the plot as a TIFF file
+  plot_file_name <- paste0(cov, ".tiff")
+  setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Emax")
+  ggsave(plot_file_name, plot = plot_obj, width = 5, height = 4, dpi = 400)
+  saveRDS(ce, file = paste0("ce_", cov, ".rds"))
+  # Extract and save regression coefficients to Excel
+  coeffs <- as.data.frame(fixef(fit))  # Extract fixed effects coefficients
+  coeffs <- cbind(Parameter = rownames(coeffs), coeffs)  # Add a column for parameter names
+  rownames(coeffs) <- NULL  # Remove row names
+  addWorksheet(wb, cov)
+  writeData(wb, sheet = cov, coeffs)
+}
+# Save the Excel workbook
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Emax")
+saveWorkbook(wb, "regression_coefficients.xlsx", overwrite = TRUE)
+```
+
+### Get the comparison results across the different dose combinations
+
+```{r}
+Abstract_EC50 <- function(path, file_name, dose_variable) {
+  setwd(path)
+  file_path <- file_name
+  sheet_names <- excel_sheets(file_path)
+  results <- list()
+  
+  # Loop through each sheet and extract the relevant row
+  for (sheet in sheet_names) {
+    data <- read_excel(file_path, sheet = sheet)
+    extracted_row <- data %>%
+      filter(Parameter == "EC50_Intercept")
+    
+    # Add the sheet name as a column
+    if (nrow(extracted_row) > 0) {
+      extracted_row <- extracted_row %>%
+        mutate(Covariates = sheet)
+    
+      # Append the result to the list
+      results[[sheet]] <- extracted_row
+    }
+  }
+  
+  # Combine all extracted rows into one data frame
+  final_result <- bind_rows(results)
+  
+  # Select relevant columns
+  final_result <- final_result %>% select(Parameter, Covariates, Estimate, Est.Error, Q2.5, Q97.5)%>%
+  mutate(across(c(Estimate, Est.Error, Q2.5, Q97.5), ~ round(.x, 2)))
+  # Assign the result to a variable with the name given in dose_variable
+  assign(dose_variable, final_result, envir = .GlobalEnv)
+}
+
+Abstract_EC50("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Emax", "regression_coefficients.xlsx", "EC50_500")
+Abstract_EC50("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Emax", "regression_coefficients.xlsx", "EC50_200")
+Abstract_EC50("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Emax", "regression_coefficients.xlsx", "EC50_100")
+Abstract_EC50("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS/True inverse ER_PFS_DH1_HL24_ID20871_ii24_0.001mg/Emax", "regression_coefficients.xlsx", "EC50_60")
+
+wb_EC50 <- createWorkbook()
+addWorksheet(wb_EC50, "500")
+addWorksheet(wb_EC50, "200")
+addWorksheet(wb_EC50, "100")
+addWorksheet(wb_EC50, "60")
+writeData(wb_EC50, sheet = "500", x = EC50_500)
+writeData(wb_EC50, sheet = "200", x = EC50_200)
+writeData(wb_EC50, sheet = "100", x = EC50_100)
+writeData(wb_EC50, sheet = "60", x = EC50_60)
+setwd( "C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/PFS") 
+saveWorkbook(wb_EC50, file = "DH1_Logistic Emax model_EC50 summary_withcontrol.xlsx", overwrite = TRUE)
+```
+
+

@@ -1,0 +1,278 @@
+---
+title: "ER2_DH2_AE_HL24_ii24"
+author: "Xuefen Yin"
+date: "2024-12-31"
+output: html_document
+---
+
+```{r setup, echo = F}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+rm(list=ls(all=TRUE))
+
+library(mrgsolve)
+library(tidyverse)
+library(ggExtra)
+library(ggridges)
+library(purrr)
+library(grid)
+library(cowplot)
+library(openxlsx)
+library(broom)
+library(readxl)
+library(zoo)
+
+new_path <- paste("C:/rtools44/usr/bin", "C:/rtools44/mingw64/bin", Sys.getenv("PATH"), sep=";")
+Sys.setenv(PATH = new_path)
+
+```
+# Introduction
+
+This R file was used to generate the datasets to:  
+1) calculate true ER relationship for ORR and PFS 
+2) for Modified method validation in both ER1 and ER2
+
+#Generate the df.exp
+##2.1 Generate df.exp
+```{r echo=FALSE}
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis")
+##input the PKPD individual parameters
+idata.PKPD <- read.csv("PKPD Baseline.csv")
+# mrgsolve model
+PKPD_model<- mread_cache("PKPD_tumor_DH2_AE_LDR.mod") 
+
+HDOSE <- 60
+MDOSE <- 40
+LDOSE <- 20
+
+# Generate dose_label
+dose_label <- c("0mg", paste0(c(LDOSE, MDOSE, HDOSE), "mg"))
+# Generate legend.labels_dose
+legend.labels_dose <- paste0("Q", 1:4, ": ", dose_label)
+
+idata.PKPD.dose <-  idata.PKPD%>%
+                     mutate(DOSEI=HDOSE,
+                       DOSEII=MDOSE,
+                       DOSEIII=LDOSE)%>%
+                     rename(EMAX=emax, EC50= ec50, Ktol=ktol)
+  
+ID.MAX <-max(idata.PKPD$ID)
+
+evnt <- ev(amt=0, ii=24, ID=1:ID.MAX)
+
+set.seed(20817)
+out.pkpd <- PKPD_model%>%
+            idata_set(idata.PKPD.dose)%>%
+            ev(evnt)%>%
+            mrgsim(
+               tgrid = c(seq(0, 24*600, by = 1)),
+               carry.out = "EVID", 
+               recsort = 3,
+               atol = 1e-12,
+               rtol = 1e-10 )
+
+out_df <- as.data.frame(out.pkpd)
+
+# calculate the exposure metrics
+exp <- out_df %>% 
+  filter(EVID == 0) %>%
+  select(-EVID,-GUT,-CENT,-PERIPH,-KA, -V2, -Q, -V3, -TR, -LPBase, -LPSlope)%>%
+  mutate(DAY = ceiling(time/24),
+         CP = if_else(CP < 0, 0, CP), # replace the really small CP to 0
+         AUC = if_else(AUC < 0, 0,AUC))%>%  # replace the negative AUC to 0
+  filter(time > 0)%>%
+  mutate(CavgTE = AUC/time)%>%  # average concentration time to event
+  group_by(ID, DAY) %>%
+  mutate(Cmax = max(CP),
+         Ctrough = tail(CP,1)) %>%
+  rename(DOSE=Dose) %>%
+  ungroup() 
+  
+ #used to plot the first dosing interval profile
+exp.1.hour<- exp %>%
+          rename(TumorB= Tumor_0,
+                 AUCTE=AUC,
+                 Kgrow=KG,
+                 kdecay=KD)%>%
+          select(ID,DAY,DOSE, AE,time,CL,TumorB, Kgrow, kdecay, EMAX, EC50, Ktol, Tumor, CP,Cmax,Ctrough,AUCTE,CavgTE)
+
+# used to conduct ER analysis 
+exp.1<- exp.1.hour%>% filter(time %% 24 == 0)
+
+AUC1D <- exp.1 %>%
+  group_by(ID) %>%
+  # Calculate the last AUCTE for each day for each ID
+  group_by(DAY, .add = TRUE) %>%
+  summarize(LastAUCTE = last(AUCTE), .groups = 'drop_last') %>%
+  # Calculate daily AUC for each ID
+  group_by(ID) %>%
+  mutate(AUC1D = LastAUCTE - lag(LastAUCTE, default=0)) %>%
+  ungroup()%>%
+  select(-LastAUCTE)%>%
+  mutate(AUC1D = if_else(AUC1D < 0, 0,AUC1D))
+
+Combined.data <- left_join(exp.1, AUC1D, by = c("ID", "DAY"))
+
+# calculate all possible necessary exposure matrix
+exp.2 <- Combined.data%>%
+  group_by(ID) %>%
+  mutate(AUC1W = rollsum(AUC1D, 7, fill = NA, align = "right"),
+         AUC2W = rollsum(AUC1D, 14, fill = NA, align = "right"),
+         AUC3W = rollsum(AUC1D, 21, fill = NA, align = "right"),
+         AUC4W = rollsum(AUC1D, 28, fill = NA, align = "right"),
+         Cavg = AUC1D / 24,
+         Cavg1W = AUC1W / (24*7),
+         Cavg2W = AUC2W / (24*14),
+         Cavg3W = AUC3W / (24*21),
+         Cavg4W = AUC4W / (24*28)) %>%
+  ungroup()%>%
+  select(-time, -AUCTE,-AUC1D,-AUC1W,-AUC2W,-AUC3W,-AUC4W)%>%
+  mutate(Cavg1W = ifelse(is.na(Cavg1W), CavgTE, Cavg1W),
+         Cavg2W = ifelse(is.na(Cavg2W), CavgTE, Cavg2W),
+         Cavg3W = ifelse(is.na(Cavg3W), CavgTE, Cavg3W),
+         Cavg4W = ifelse(is.na(Cavg4W), CavgTE, Cavg4W))
+
+exp.3 <- exp.2 %>%
+          group_by(ID) %>%
+          mutate(
+                Cavg1WC1 = if_else(DAY > 7, Cavg1W, Cavg1W[DAY == 7]),
+                Cavg2WC1 = if_else(DAY > 14, Cavg2W, Cavg2W[DAY == 14]),
+                Cavg4WC1 = if_else(DAY > 28, Cavg4W, Cavg4W[DAY == 28]),
+                CavgTE2WC1 = if_else(DAY > 14, CavgTE, Cavg2W[DAY == 14]),
+                CavgTE4WC1 = if_else(DAY > 28, CavgTE, Cavg4W[DAY == 28])
+                ) %>%
+          ungroup()
+
+## Calculate the accumulative average dose
+df.exp <- exp.3 %>%
+  group_by(ID) %>%
+  arrange(ID, DAY) %>%
+  mutate(CMDOSE = cumsum(DOSE)) %>%
+  ungroup() %>%
+  mutate(avgDOSE = CMDOSE/DAY) %>%
+  select(ID, DAY, DOSE,AE, CMDOSE, avgDOSE,  everything())
+
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+saveRDS(df.exp, file = "df_exp_500&200&100.rds")
+```
+##2.2 Generate df.ER.IDQ for ORR and PFS 
+```{r}
+## PFS
+df.exp <- readRDS("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24/df_exp_500&200&100.rds")
+
+df.ER.PFS <- df.exp %>%
+        mutate( event = if_else(Tumor < 1.2 * TumorB, 0, 1),
+                LAST=0) %>%
+        group_by(ID) %>%
+  # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(event == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+  # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((event == 0 & DAY < first_event_day) | (event == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | event == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)%>%
+         rename(EVENT=event)
+
+analysis.PFS <- df.ER.PFS %>% filter(LAST == 1)
+
+## Generate df.ER.IDQ for ORR(will used for loop function)
+df.ER.ID.PFS <- df.ER.PFS %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID.PFS <-  analysis.PFS[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ.PFS <- merge(df.ER.ID.PFS, G.ID.PFS, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+write.csv(df.ER.IDQ.PFS, "PFS_df_ER_IDQ_500&200&100.csv", row.names = FALSE)
+
+
+#using PFS to truncate the followup time for ORR
+Analysis.PFS <-  df.exp %>%
+        mutate( EVENT = if_else(Tumor < 1.2 * TumorB, 0, 1),
+                LAST=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((EVENT == 0 & DAY < first_event_day) | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)%>% filter(LAST == 1)%>%
+         select(ID, DAY, EVENT)%>% rename(PFS=DAY, PFS.EVENT=EVENT)
+
+
+df.exp.PFStruncation <- data.frame()
+
+for (i in 1:1000) {
+  single <- Analysis.PFS$PFS[i]
+  rows_for_id <- df.exp[df.exp$ID == i, ]
+  rows_for_id <- rows_for_id[rows_for_id$DAY <= single, ]
+  max_row <- which.max(rows_for_id$DAY)
+  rows_for_id$LAST <- ifelse(1:nrow(rows_for_id) == max_row, 1, 0)
+  df.exp.PFStruncation <- bind_rows(df.exp.PFStruncation, rows_for_id)
+}
+
+
+df.ER <- df.exp.PFStruncation %>%
+        group_by(ID) %>%
+  
+        mutate( EVENT = if_else(Tumor < 0.7 * TumorB, 1, 0),
+                LAST=0) %>%
+        group_by(ID) %>%
+         # Identify the first DAY where EVENT = 1 for each ID
+         mutate(first_event_day = ifelse(EVENT == 1, DAY, NA_real_)) %>%
+         mutate(first_event_day = min(first_event_day, na.rm = TRUE)) %>%
+         # Keep all rows where EVENT = 0 or it's the first occurrence of EVENT = 1
+         filter((EVENT == 0 & DAY < first_event_day) | (EVENT == 1 & DAY == first_event_day)) %>%
+         mutate(last_day = max(DAY))%>%
+         mutate(LAST = if_else(DAY == last_day | EVENT == 1, 1, LAST)) %>%
+         ungroup()%>%
+         select(-first_event_day,-last_day)
+
+analysis <- df.ER %>% filter(LAST == 1)
+## Generate df.ER.IDQ for ORR(will used for loop function)
+df.ER.ID <- df.ER %>%
+            filter(DAY == 1) %>%
+            select(ID,CL,TumorB,Kgrow,kdecay,EMAX,EC50,Ktol,Ctrough,Cavg,Cavg2WC1,Cavg4WC1)%>%
+            rename(Ctrough1D=Ctrough,
+                   Cavg1D=Cavg)
+# last day CavgTE and EVENT & DAY
+G.ID <-  analysis[,c("ID","DOSE","DAY","avgDOSE","Ctrough", "Cavg","Cavg1W","Cavg2W","Cavg4W","Cavg2WC1","Cavg4WC1","CavgTE", "CavgTE2WC1","CavgTE4WC1","EVENT")]%>%
+         rename(avgDoseTE=avgDOSE,
+                CtroughOED=Ctrough,
+                CavgOED=Cavg,
+                Cavg1WOED=Cavg1W,
+                Cavg2WOED=Cavg2W,
+                Cavg4WOED=Cavg4W,
+                Cavg2WC1OED=Cavg2WC1,
+                Cavg4WC1OED=Cavg4WC1)
+
+df.ER.IDQ <- merge(df.ER.ID, G.ID, by = "ID")%>%
+             select(ID, DAY, DOSE, EVENT,avgDoseTE, CL, TumorB,Kgrow, kdecay, EMAX, EC50, Ktol, 
+                    Ctrough1D, CtroughOED, Cavg1D,CavgOED,Cavg1WOED,
+                    Cavg2WC1,Cavg2WOED,Cavg2WC1OED,
+                    Cavg4WC1,Cavg4WOED,Cavg4WC1OED,
+                    CavgTE,CavgTE2WC1,CavgTE4WC1)
+setwd("C:/Users/Xuefen.Yin/OneDrive - FDA/ER2 analysis/ER2_DH2_AE_HL24_ii24")
+write.csv(df.ER.IDQ, "ORR_df_ER_IDQ_500&200&100.csv", row.names = FALSE)
+```
